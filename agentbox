@@ -41,13 +41,23 @@ DEFAULT_CONFIG_PATH = Path(
 # against the working directory, which is what keeps this policy project-neutral.
 SRT_SETTINGS: dict[str, Any] = {
     "filesystem": {
-        "denyRead": ["~"],
+        "denyRead": [
+            "~",
+            # Cargo keeps registry tokens alongside its otherwise useful tool
+            # state. Keep those hidden while exposing the Rust toolchain.
+            "~/.cargo/credentials",
+            "~/.cargo/credentials.toml",
+        ],
         "allowRead": [
             ".",
+            "~/.cargo",
             "~/.claude",
             "~/.claude.json",
             "~/.codex",
             "~/.local",
+            # OrbStack points /var/run/docker.sock at this path under $HOME.
+            "~/.orbstack/run/docker.sock",
+            "~/.rustup",
             "~/.cache",
             "~/Library/Caches",
             "~/.gitconfig",
