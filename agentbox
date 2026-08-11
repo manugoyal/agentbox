@@ -142,7 +142,13 @@ SRT_SETTINGS: dict[str, Any] = {
             "*.amazonaws.com",
             "*.amazon.com",
             "*.cloudfront.net",
+            # Datadog commercial and government sites, including managed MCP.
+            "datadoghq.com",
             "*.datadoghq.com",
+            "datadoghq.eu",
+            "*.datadoghq.eu",
+            "ddog-gov.com",
+            "*.ddog-gov.com",
             "braintrust.dev",
             "*.braintrust.dev",
             "braintrustdata.com",
@@ -253,7 +259,11 @@ CONFIG_ENV_VARS = {
 }
 
 # Asked about only when there is no config file, to keep a first run useful.
-PROMPTED_SECRETS = ("GH_TOKEN", "BRAINTRUST_API_KEY")
+PROMPTED_SECRETS = (
+    "GH_TOKEN",
+    "BRAINTRUST_API_KEY",
+    "DATADOG_SERVICE_ACCESS_TOKEN",
+)
 
 EXAMPLE_CONFIG = """\
 # agentbox defaults. Every key is optional, but a file that exists is
@@ -276,6 +286,7 @@ aws_region = "us-east-1"
 [secrets]
 GH_TOKEN = "$GH_TOKEN_REFERENCE"
 BRAINTRUST_API_KEY = "op://Private/braintrust/api-key"
+DATADOG_SERVICE_ACCESS_TOKEN = "$DATADOG_SERVICE_ACCESS_TOKEN_REFERENCE"
 
 # Plain environment variables — nothing secret, since this file is not encrypted.
 # Use this for context a tool would otherwise read from a config file that the

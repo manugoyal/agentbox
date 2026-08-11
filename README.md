@@ -58,6 +58,29 @@ A command is always required and should follow `--`:
 `agentbox` does not add, remove, or rewrite child arguments. Include any
 full-allow option required by your agent in the command you supply.
 
+### Datadog MCP
+
+The embedded policy allows Datadog's commercial and government sites. To give
+the managed Datadog MCP server a Service Access Token, add its 1Password
+reference to the agentbox config:
+
+```toml
+[secrets]
+DATADOG_SERVICE_ACCESS_TOKEN = "$DATADOG_SERVICE_ACCESS_TOKEN_REFERENCE"
+```
+
+Then configure Codex to use that environment variable as the remote server's
+bearer token in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.datadog]
+url = "https://mcp.datadoghq.com/v1/mcp"
+bearer_token_env_var = "DATADOG_SERVICE_ACCESS_TOKEN"
+```
+
+Create the service account and token with only the Datadog roles and scopes the
+agent needs. Use the endpoint for your Datadog site if it is not US1.
+
 Run `./agentbox --help` for all options, `./agentbox --print-settings` to inspect
 the embedded `srt` policy, and `./agentbox --print-config` for a commented TOML
 config example. The default config path is `~/.config/agentbox.toml`; an existing
