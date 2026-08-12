@@ -1,0 +1,43 @@
+{
+  "name": "agentbox",
+  "version": "0.1.0",
+  "description": "Run coding agents with explicit credentials inside Anthropic Sandbox Runtime",
+  "type": "module",
+  "bin": {
+    "agentbox": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run build && node --test test/*.test.js",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "keywords": [
+    "agent",
+    "sandbox",
+    "security",
+    "srt"
+  ],
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.71",
+    "smol-toml": "^1.3.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.15",
+    "@types/node-forge": "^1.3.14",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3"
+  }
+}

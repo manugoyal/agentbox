@@ -1,47 +1,80 @@
 # agentbox
 
 `agentbox` runs an explicitly named command inside [Anthropic Sandbox Runtime
-(`srt`)](https://github.com/anthropic-experimental/sandbox-runtime). It is meant
-for tools such as coding agents that are most useful in full-allow mode: the tool
-can operate freely within the sandbox while `srt` limits its filesystem and
-network access.
+(SRT)](https://github.com/anthropic-experimental/sandbox-runtime). It is designed
+for coding agents that are most useful in full-allow mode: the agent can work
+freely inside the sandbox while SRT limits the files and network destinations it
+can reach.
 
-The script starts with a small allowlist of host environment variables. It can
-also export temporary AWS credentials and resolve 1Password references on the
-host before launching the sandbox, so the child never needs access to `~/.aws`
-or the 1Password client.
+Agentbox passes through a small host-environment allowlist. It can also exchange
+an AWS profile for temporary credentials and resolve 1Password references on the
+host, so the sandbox never needs access to `~/.aws` or the 1Password client.
 
 ## Prerequisites
 
-Required:
+Agentbox requires Node.js 20.11 or newer and the command you intend to run. SRT
+is installed automatically as an npm dependency; do not install it separately.
 
-- macOS or Linux. The embedded policy is currently tailored to macOS; review it
-  before relying on it elsewhere.
-- [`uv`](https://docs.astral.sh/uv/getting-started/installation/). It supplies
-  the Python 3.11+ runtime declared by the script, so a separate Python install
-  is not required.
-- Node.js and npm, then Sandbox Runtime:
+On Linux, SRT also requires `bubblewrap`, `socat`, and `ripgrep`. The embedded
+policy is primarily exercised on macOS, so review it before relying on another
+platform.
 
-  ```sh
-  npm install -g @anthropic-ai/sandbox-runtime
-  ```
+The following tools are optional:
 
-- The command you want to run, such as Claude Code, Codex, or a shell.
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+  when selecting an AWS profile.
+- [1Password CLI](https://www.1password.dev/cli/get-started) when injecting
+  secrets. `op` must be signed in on the host.
 
-Optional:
+## Build and install from a checkout
 
-- [AWS CLI
-  v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-  when using `--profile` or `aws_profile`.
-- [1Password CLI](https://www.1password.dev/cli/get-started) when using
-  `--secret` or the `[secrets]` config table. `op` must be signed in on the host.
-
-Make the script executable if needed, then invoke it directly or place it on
-your `PATH`:
+For normal use, install a private copy directly from the checkout:
 
 ```sh
-chmod +x agentbox
-./agentbox -- bash
+npm install
+npm install --global .
+```
+
+This does not publish anything. `npm install` installs the pinned runtime and
+development dependencies. The global install automatically runs the package's
+`prepack` script, which compiles `src/` into `dist/`, and then puts `agentbox` on
+your `PATH`. Verify the installation with:
+
+```sh
+agentbox --version
+```
+
+Run `npm install --global .` again whenever you want the installed copy to pick
+up changes from the checkout. Remove it with `npm uninstall --global agentbox`.
+
+### Work directly from the checkout
+
+While developing agentbox, an npm link avoids reinstalling after every change:
+
+```sh
+npm install
+npm run build
+npm link
+```
+
+The global `agentbox` command now points at this checkout. Rebuild after editing
+the TypeScript; the link itself does not need to be recreated:
+
+```sh
+npm run build
+# Or keep the compiler running:
+npm run build -- --watch
+```
+
+Remove the development link with `npm unlink --global agentbox`.
+
+To run without either kind of global installation, build and invoke the entry
+point with Node:
+
+```sh
+npm install
+npm run build
+node dist/cli.js -- bash
 ```
 
 ## Usage
@@ -49,28 +82,41 @@ chmod +x agentbox
 A command is always required and should follow `--`:
 
 ```sh
-./agentbox -- bash
-./agentbox -y -- claude --dangerously-skip-permissions
-./agentbox -p development-readonly -- aws sts get-caller-identity
-./agentbox -s 'GH_TOKEN=$GH_TOKEN_REFERENCE' -- gh repo view
+agentbox -- bash
+agentbox -y -- claude --dangerously-skip-permissions
+agentbox -p development-readonly -- aws sts get-caller-identity
+agentbox -s 'GH_TOKEN=$GH_TOKEN_REFERENCE' -- gh repo view
 ```
 
-`agentbox` does not add, remove, or rewrite child arguments. Include any
-full-allow option required by your agent in the command you supply.
+Agentbox passes the complete command through unchanged. It never supplies a
+default command or adds full-allow flags.
+
+Run `agentbox --help` for all options, `agentbox --print-settings` to inspect the
+embedded SRT policy, and `agentbox --print-config` for a commented config
+example. The default config path is `~/.config/agentbox.toml`. An existing config
+is authoritative: credentials it omits are neither prompted for nor granted.
+
+The embedded policy restricts filesystem access and uses one explicit network
+allowlist; unmatched destinations are denied. Review the policy and the scope of
+any credentials you inject, because full-allow mode is only as safe as those
+boundaries. On macOS, agentbox runs Bazel in batch mode so the build itself stays
+inside the sandbox while its on-disk caches remain reusable.
+
+Run agentbox on the host rather than from another sandbox. AWS SSO, for example,
+may need to refresh files under `~/.aws/sso/cache` before agentbox exports its
+temporary credentials.
 
 ### Datadog MCP
 
-The embedded policy allows Datadog's commercial and government sites. To give
-the managed Datadog MCP server a Service Access Token, add its 1Password
-reference to the agentbox config:
+To authenticate the managed Datadog MCP server, put a narrowly scoped Service
+Access Token in 1Password and reference it from the agentbox config:
 
 ```toml
 [secrets]
 DATADOG_SERVICE_ACCESS_TOKEN = "$DATADOG_SERVICE_ACCESS_TOKEN_REFERENCE"
 ```
 
-Then configure Codex to use that environment variable as the remote server's
-bearer token in `~/.codex/config.toml`:
+Then configure the Codex harness to use the environment variable:
 
 ```toml
 [mcp_servers.datadog]
@@ -78,25 +124,16 @@ url = "https://mcp.datadoghq.com/v1/mcp"
 bearer_token_env_var = "DATADOG_SERVICE_ACCESS_TOKEN"
 ```
 
-Create the service account and token with only the Datadog roles and scopes the
-agent needs. Use the endpoint for your Datadog site if it is not US1.
+Use the MCP endpoint for your Datadog site if it is not US1.
 
-Run `./agentbox --help` for all options, `./agentbox --print-settings` to inspect
-the embedded `srt` policy, and `./agentbox --print-config` for a commented TOML
-config example. The default config path is `~/.config/agentbox.toml`; an existing
-config is authoritative, so omitted credentials are not prompted for or granted.
+## Development
 
-The embedded policy allows writes to the working tree and selected tool/cache
-directories, blocks writes to agent settings and Git hooks, and limits network
-access to an explicit domain list. Review the policy and the permissions of any
-credentials you inject: full-allow mode is only as safe as those boundaries.
-It deliberately gives the sandbox read/write access to `~/.claude` and
-`~/.codex` so those harnesses can reuse their existing login and runtime state;
-their configuration and hook files remain read-only.
-
-Run `agentbox` on the host rather than from another sandbox. In particular, AWS
-SSO may need to refresh files under `~/.aws/sso/cache` before temporary
-credentials can be exported.
+```sh
+npm run format:check
+npm run check
+npm test
+npm pack --dry-run
+```
 
 ## License
 
