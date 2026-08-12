@@ -3,17 +3,18 @@
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 type ShimConfig = {
-  executable: string;
+  bazelExecutable: string;
+  gitExecutable?: string;
   outputUserRoot: string;
 };
 
 // Keep the temporary shim self-contained. It is copied out of dist/ at runtime,
 // so importing another package-relative module would make the copy depend on
 // the installed directory layout. This is the one small process helper it needs.
-function runBazel(
+function runCommand(
   executable: string,
   args: readonly string[],
   environment: NodeJS.ProcessEnv,
@@ -49,10 +50,16 @@ function loadConfig(): ShimConfig {
     throw new Error("invalid agentbox Bazel shim config");
   }
   const values = parsed as Partial<ShimConfig>;
-  for (const name of ["executable", "outputUserRoot"] as const) {
+  for (const name of ["bazelExecutable", "outputUserRoot"] as const) {
     if (typeof values[name] !== "string" || !values[name]) {
       throw new Error(`invalid agentbox Bazel shim config: ${name}`);
     }
+  }
+  if (
+    values.gitExecutable !== undefined &&
+    (typeof values.gitExecutable !== "string" || !values.gitExecutable)
+  ) {
+    throw new Error("invalid agentbox Bazel shim config: gitExecutable");
   }
   return values as ShimConfig;
 }
@@ -60,9 +67,21 @@ function loadConfig(): ShimConfig {
 async function main(): Promise<number> {
   const config = loadConfig();
   const userArguments = process.argv.slice(2);
+  const shimName = basename(process.argv[1] ?? "");
 
-  return runBazel(
-    config.executable,
+  if (shimName === "git" || shimName === "git.mjs") {
+    if (!config.gitExecutable) {
+      throw new Error("agentbox could not resolve the real Git executable");
+    }
+    return runCommand(
+      config.gitExecutable,
+      ["-c", "http.proxyAuthMethod=basic", ...userArguments],
+      process.env,
+    );
+  }
+
+  return runCommand(
+    config.bazelExecutable,
     [
       `--output_user_root=${config.outputUserRoot}`,
       "--batch",
