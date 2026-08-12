@@ -16,8 +16,9 @@
     "check": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "npm run build && node --test test/*.test.js",
-    "prepack": "npm run build"
+    "install:global": "npm run build && npm install --global .",
+    "prepack": "npm run build",
+    "test": "npm run build && node --test test/*.test.js"
   },
   "engines": {
     "node": ">=20.11.0"

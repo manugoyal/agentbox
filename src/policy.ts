@@ -72,6 +72,19 @@ export const EMBEDDED_POLICY = {
     ],
   },
   network: {
+    // This is a pragmatic allowlist of providers and ecosystems we trust tools
+    // to use, and is intentionally generous within those boundaries. Allow an
+    // exact registrable domain when only its apex is needed. When we trust an
+    // organization's full service namespace, prefer a wildcard immediately
+    // beneath that domain; add the apex separately when it is also needed (SRT
+    // wildcards do not match it). Use narrower hostnames for multi-tenant
+    // infrastructure when practical. Avoid arbitrary end-user domains and
+    // blanket suffixes such as "*.com".
+    //
+    // Provider trust is not the same as origin ownership: multi-tenant hosts
+    // such as object storage can serve content controlled by their customers.
+    // This policy accepts that tradeoff for useful development infrastructure;
+    // filesystem restrictions and narrowly scoped credentials remain essential.
     allowedDomains: [
       // Agent APIs and authentication.
       "*.anthropic.com",
@@ -92,6 +105,7 @@ export const EMBEDDED_POLICY = {
       // Package registries and tool downloads.
       "registry.npmjs.org",
       "*.npmjs.org",
+      "*.crates.io",
       "pypi.org",
       "*.pypi.org",
       "files.pythonhosted.org",
@@ -99,6 +113,8 @@ export const EMBEDDED_POLICY = {
       "astral.sh",
       "*.astral.sh",
       "*.jdx.dev",
+      "*.rust-lang.org",
+      "nodejs.org",
       "bcr.bazel.build",
       "registry.terraform.io",
       "releases.hashicorp.com",
@@ -110,6 +126,8 @@ export const EMBEDDED_POLICY = {
       "*.amazonaws.com",
       "*.amazon.com",
       "*.cloudfront.net",
+      "googleapis.com",
+      "*.googleapis.com",
       "datadoghq.com",
       "*.datadoghq.com",
       "datadoghq.eu",

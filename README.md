@@ -28,24 +28,28 @@ The following tools are optional:
 
 ## Build and install from a checkout
 
-For normal use, install a private copy directly from the checkout:
+For normal use, build the checkout and expose `agentbox` on your `PATH`:
 
 ```sh
 npm install
-npm install --global .
+npm run install:global
 ```
 
 This does not publish anything. `npm install` installs the pinned runtime and
-development dependencies. The global install automatically runs the package's
-`prepack` script, which compiles `src/` into `dist/`, and then puts `agentbox` on
-your `PATH`. Verify the installation with:
+development dependencies. `install:global` explicitly compiles `src/` into
+`dist/` before asking npm to install the local package globally. That explicit
+build is important because npm may implement a global install from a local
+directory as a link to the checkout without running its package lifecycle
+scripts. Verify the installation with:
 
 ```sh
 agentbox --version
 ```
 
-Run `npm install --global .` again whenever you want the installed copy to pick
-up changes from the checkout. Remove it with `npm uninstall --global agentbox`.
+Run `npm run install:global` again whenever you want to reliably refresh the
+global command. If npm linked the checkout, `npm run build` alone is enough
+after TypeScript-only changes. Remove the installation with
+`npm uninstall --global agentbox`.
 
 ### Work directly from the checkout
 

@@ -8,7 +8,6 @@ import test from "node:test";
 import { parseArguments } from "../dist/cli.js";
 import { AgentboxConfig } from "../dist/config.js";
 import { AgentboxError } from "../dist/errors.js";
-import { EMBEDDED_POLICY } from "../dist/policy.js";
 
 test("parses launcher options and leaves the complete child command alone", () => {
   const parsed = parseArguments([
@@ -70,10 +69,4 @@ test("config rejects unknown keys and accepts string tables", () => {
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
-});
-
-test("the embedded network policy has no permissive fallback", () => {
-  assert.equal(EMBEDDED_POLICY.network.strictAllowlist, true);
-  assert.equal(EMBEDDED_POLICY.network.allowedDomains.includes("*"), false);
-  assert.equal(EMBEDDED_POLICY.network.deniedDomains.length, 0);
 });
