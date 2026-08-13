@@ -17,6 +17,7 @@ import {
   PROMPTED_SECRETS,
 } from "./config.js";
 import { exportAwsCredentials, readSecrets } from "./credentials.js";
+import { RestrictedDockerProxy } from "./docker-proxy.js";
 import { AgentboxError, fail } from "./errors.js";
 import {
   loadPolicy,
@@ -56,6 +57,7 @@ const PASSTHROUGH_ENV_VARS = [
 ] as const;
 
 const TOOL_CONFIG_DIRS = {
+  DOCKER_CONFIG: join(homedir(), ".cache", "agentbox", "docker"),
   GH_CONFIG_DIR: join(homedir(), ".cache", "agentbox", "gh"),
   npm_config_cache: join(homedir(), ".cache", "agentbox", "npm"),
 } as const;
@@ -247,8 +249,11 @@ async function launch(
   prepareRuntimeDirectories();
   let compatibility:
     Awaited<ReturnType<typeof prepareBazelCompatibility>> | undefined;
+  let dockerProxy: RestrictedDockerProxy | undefined;
 
   try {
+    dockerProxy = await RestrictedDockerProxy.startIfAvailable();
+    if (dockerProxy) Object.assign(environment, dockerProxy.environment);
     await SandboxManager.initialize(policy.config);
     compatibility = prepareBazelCompatibility(environment.PATH ?? "");
     Object.assign(environment, compatibility.environment);
@@ -286,6 +291,7 @@ async function launch(
   } finally {
     SandboxManager.cleanupAfterCommand();
     compatibility?.close();
+    await dockerProxy?.close();
     await SandboxManager.reset();
   }
 }

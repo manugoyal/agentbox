@@ -30,8 +30,6 @@ export const EMBEDDED_POLICY = {
       "~/.claude.json",
       "~/.codex",
       "~/.local",
-      // OrbStack points /var/run/docker.sock at this target under $HOME.
-      "~/.orbstack/run/docker.sock",
       "~/.rustup",
       "~/.cache",
       "~/Library/Caches",
@@ -129,6 +127,7 @@ export const EMBEDDED_POLICY = {
       "*.cloudfront.net",
       "googleapis.com",
       "*.googleapis.com",
+      "*.gstatic.com",
       "datadoghq.com",
       "*.datadoghq.com",
       "datadoghq.eu",
@@ -163,9 +162,10 @@ export const EMBEDDED_POLICY = {
     // Go asks trustd to verify certificates. Without this Mach lookup, gh and
     // Terraform report misleading TLS or authentication failures on macOS.
     allowMachLookup: ["com.apple.trustd.agent"],
-    // Unix sockets do not provide network egress. This is required for Docker
-    // and for coding agents that run their own nested SRT instance.
-    allowAllUnixSockets: true,
+    // Unix sockets stay blocked. Agentbox's restricted Docker API is a
+    // host-side localhost proxy; the raw daemon socket never crosses this
+    // boundary because it would bypass the filesystem and network policy.
+    allowAllUnixSockets: false,
   },
   ignoreViolations: {},
   allowPty: true,

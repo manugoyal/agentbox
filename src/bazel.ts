@@ -60,6 +60,13 @@ const NO_BAZEL_COMPATIBILITY: BazelCompatibility = {
  * option makes the batch JVM connect to SRT's ordinary authenticated proxy over
  * native IPv4. No custom relay or network-policy exception is needed.
  *
+ * Bazel also constructs a fresh environment for test actions rather than
+ * passing through arbitrary launcher variables. When agentbox has made its
+ * restricted Docker API proxy available, the shim explicitly carries the
+ * proxy's DOCKER_HOST and localhost testcontainers override into tests. These
+ * point at an agentbox-owned TCP listener; the host Docker socket itself is
+ * never exposed to the Bazel process or test action.
+ *
  * Bazel's built-in git_repository rule creates one more proxy wrinkle. SRT
  * puts `http.proxyAuthMethod=basic` in GIT_CONFIG_PARAMETERS so Git pre-sends
  * credentials to its authenticated localhost proxy. Bazel deliberately clears

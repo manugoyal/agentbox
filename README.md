@@ -25,6 +25,8 @@ The following tools are optional:
   when selecting an AWS profile.
 - [1Password CLI](https://www.1password.dev/cli/get-started) when injecting
   secrets. `op` must be signed in on the host.
+- A local Docker Engine when running tests or development tools that launch
+  containers.
 
 ## Build and install from a checkout
 
@@ -103,8 +105,14 @@ is authoritative: credentials it omits are neither prompted for nor granted.
 The embedded policy restricts filesystem access and uses one explicit network
 allowlist; unmatched destinations are denied. Review the policy and the scope of
 any credentials you inject, because full-allow mode is only as safe as those
-boundaries. On macOS, agentbox runs Bazel in batch mode so the build itself stays
-inside the sandbox while its on-disk caches remain reusable.
+boundaries. If a local Docker Engine is available, agentbox exposes a restricted
+per-session subset of the standard Docker API for ordinary container workflows.
+Arbitrary public images may run, but the raw daemon socket, host resources,
+privileged settings, other sessions, and daemon-wide administration stay out of
+reach. Workload containers can communicate within the session but have no route
+to external networks. Published TCP ports remain available on localhost; UDP and
+SCTP publication is rejected. On macOS, agentbox runs Bazel in batch mode so the
+build itself stays inside the sandbox while its on-disk caches remain reusable.
 
 Run agentbox on the host rather than from another sandbox. AWS SSO, for example,
 may need to refresh files under `~/.aws/sso/cache` before agentbox exports its

@@ -69,6 +69,25 @@ async function main(): Promise<number> {
     ...process.env,
     GIT_CONFIG_SYSTEM: config.gitConfigSystem,
   };
+  const agentboxTestEnvironment = [
+    "DOCKER_HOST",
+    "TESTCONTAINERS_HOST_OVERRIDE",
+  ].flatMap((name) =>
+    process.env[name] === undefined
+      ? []
+      : [`--test_env=${name}=${process.env[name]}`],
+  );
+  const testCommandIndex = userArguments.findIndex(
+    (argument) => argument === "test" || argument === "coverage",
+  );
+  const effectiveArguments =
+    testCommandIndex < 0
+      ? userArguments
+      : [
+          ...userArguments.slice(0, testCommandIndex + 1),
+          ...agentboxTestEnvironment,
+          ...userArguments.slice(testCommandIndex + 1),
+        ];
 
   return runCommand(
     config.bazelExecutable,
@@ -76,7 +95,7 @@ async function main(): Promise<number> {
       `--output_user_root=${config.outputUserRoot}`,
       "--batch",
       "--host_jvm_args=-Djava.net.preferIPv4Stack=true",
-      ...userArguments,
+      ...effectiveArguments,
     ],
     bazelEnvironment,
   );
