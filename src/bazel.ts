@@ -66,9 +66,12 @@ const NO_BAZEL_COMPATIBILITY: BazelCompatibility = {
  * that variable (along with the other repository-local GIT_* variables) before
  * each repository fetch. Apple Git then attempts a proxy authentication
  * negotiation that ends with the misleading `Proxy CONNECT aborted` error.
- * A companion Git argv shim applies the same setting with `git -c` at the final
- * process boundary, after Bazel has filtered the environment. It changes no
- * user or repository config and otherwise preserves Git's arguments exactly.
+ *
+ * GIT_CONFIG_SYSTEM is not among the variables Bazel clears. The shim points it
+ * at a temporary config containing the same setting, scoped to this one batch
+ * invocation. The config includes Git's normal /etc/gitconfig first and does
+ * not replace the user's global or repository config. This is independent of
+ * PATH ordering and requires no interception of the Git executable itself.
  */
 export function prepareBazelCompatibility(
   basePath: string,
@@ -77,7 +80,6 @@ export function prepareBazelCompatibility(
 
   const bazel = findExecutable("bazel", basePath);
   if (!bazel) return NO_BAZEL_COMPATIBILITY;
-  const git = findExecutable("git", basePath);
 
   const shimDirectory = mkdtempSync(join(tmpdir(), "agentbox-bazel-"));
   try {
@@ -90,18 +92,18 @@ export function prepareBazelCompatibility(
     chmodSync(shimModulePath, 0o700);
     symlinkSync("bazel.mjs", shimPath);
 
-    if (git) {
-      const gitShimModulePath = join(shimDirectory, "git.mjs");
-      copyFileSync(shimModulePath, gitShimModulePath);
-      chmodSync(gitShimModulePath, 0o700);
-      symlinkSync("git.mjs", join(shimDirectory, "git"));
-    }
+    const gitConfigSystem = join(shimDirectory, "gitconfig");
+    writeFileSync(
+      gitConfigSystem,
+      "[include]\n\tpath = /etc/gitconfig\n[http]\n\tproxyAuthMethod = basic\n",
+      { mode: 0o600 },
+    );
 
     writeFileSync(
       join(shimDirectory, "config.json"),
       `${JSON.stringify({
         bazelExecutable: bazel,
-        gitExecutable: git,
+        gitConfigSystem,
         outputUserRoot: join(homedir(), ".cache", "agentbox", "bazel"),
       })}\n`,
       { mode: 0o600 },

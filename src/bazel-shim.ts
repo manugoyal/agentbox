@@ -3,11 +3,11 @@
 import { readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 
 type ShimConfig = {
   bazelExecutable: string;
-  gitExecutable?: string;
+  gitConfigSystem: string;
   outputUserRoot: string;
 };
 
@@ -50,16 +50,14 @@ function loadConfig(): ShimConfig {
     throw new Error("invalid agentbox Bazel shim config");
   }
   const values = parsed as Partial<ShimConfig>;
-  for (const name of ["bazelExecutable", "outputUserRoot"] as const) {
+  for (const name of [
+    "bazelExecutable",
+    "gitConfigSystem",
+    "outputUserRoot",
+  ] as const) {
     if (typeof values[name] !== "string" || !values[name]) {
       throw new Error(`invalid agentbox Bazel shim config: ${name}`);
     }
-  }
-  if (
-    values.gitExecutable !== undefined &&
-    (typeof values.gitExecutable !== "string" || !values.gitExecutable)
-  ) {
-    throw new Error("invalid agentbox Bazel shim config: gitExecutable");
   }
   return values as ShimConfig;
 }
@@ -67,18 +65,10 @@ function loadConfig(): ShimConfig {
 async function main(): Promise<number> {
   const config = loadConfig();
   const userArguments = process.argv.slice(2);
-  const shimName = basename(process.argv[1] ?? "");
-
-  if (shimName === "git" || shimName === "git.mjs") {
-    if (!config.gitExecutable) {
-      throw new Error("agentbox could not resolve the real Git executable");
-    }
-    return runCommand(
-      config.gitExecutable,
-      ["-c", "http.proxyAuthMethod=basic", ...userArguments],
-      process.env,
-    );
-  }
+  const bazelEnvironment = {
+    ...process.env,
+    GIT_CONFIG_SYSTEM: config.gitConfigSystem,
+  };
 
   return runCommand(
     config.bazelExecutable,
@@ -88,7 +78,7 @@ async function main(): Promise<number> {
       "--host_jvm_args=-Djava.net.preferIPv4Stack=true",
       ...userArguments,
     ],
-    process.env,
+    bazelEnvironment,
   );
 }
 

@@ -56,6 +56,37 @@ test("the sandbox-side runner preserves argv without shell parsing", () => {
   assert.deepEqual(JSON.parse(result.stdout), expected);
 });
 
+test("the sandbox-side runner exposes SRT's proxy to npm installers", () => {
+  const command = [
+    process.execPath,
+    "-e",
+    "process.stdout.write(JSON.stringify({ https: process.env.npm_config_https_proxy, http: process.env.npm_config_http_proxy, proxy: process.env.npm_config_proxy }))",
+  ];
+  const environment = {
+    ...process.env,
+    HTTPS_PROXY: "http://localhost:41001",
+    HTTP_PROXY: "http://localhost:41002",
+    AGENTBOX_INTERNAL_COMMAND: Buffer.from(JSON.stringify(command)).toString(
+      "base64url",
+    ),
+  };
+  delete environment.npm_config_https_proxy;
+  delete environment.npm_config_http_proxy;
+  environment.npm_config_proxy = "http://explicit.example:8080";
+
+  const result = spawnSync(process.execPath, ["dist/child-runner.js"], {
+    encoding: "utf8",
+    env: environment,
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    https: "http://localhost:41001",
+    http: "http://localhost:41002",
+    proxy: "http://explicit.example:8080",
+  });
+});
+
 test("config rejects unknown keys and accepts string tables", () => {
   const directory = mkdtempSync(join(tmpdir(), "agentbox-test-"));
   try {

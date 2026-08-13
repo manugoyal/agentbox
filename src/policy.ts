@@ -105,6 +105,7 @@ export const EMBEDDED_POLICY = {
       // Package registries and tool downloads.
       "registry.npmjs.org",
       "*.npmjs.org",
+      "*.duckdb.org",
       "*.crates.io",
       "pypi.org",
       "*.pypi.org",

@@ -19,6 +19,16 @@ async function main(): Promise<number> {
   delete process.env.AGENTBOX_INTERNAL_NODE;
   delete process.env.AGENTBOX_INTERNAL_RUNNER;
 
+  // Some npm lifecycle installers ignore the standard proxy variables and
+  // consult only npm_config_* (Supabase's postinstall is one example). SRT
+  // injects its authenticated localhost proxy after agentbox constructs the
+  // child environment, so mirror it here, inside the sandbox. Preserve an
+  // explicit npm proxy supplied by the user or config.
+  process.env.npm_config_https_proxy ??= process.env.HTTPS_PROXY;
+  process.env.npm_config_http_proxy ??= process.env.HTTP_PROXY;
+  process.env.npm_config_proxy ??=
+    process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY;
+
   const decoded: unknown = JSON.parse(
     Buffer.from(encodedCommand, "base64url").toString(),
   );

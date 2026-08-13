@@ -57,6 +57,7 @@ const PASSTHROUGH_ENV_VARS = [
 
 const TOOL_CONFIG_DIRS = {
   GH_CONFIG_DIR: join(homedir(), ".cache", "agentbox", "gh"),
+  npm_config_cache: join(homedir(), ".cache", "agentbox", "npm"),
 } as const;
 
 type ParsedArguments = {
