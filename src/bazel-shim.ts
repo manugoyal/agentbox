@@ -69,10 +69,7 @@ async function main(): Promise<number> {
     ...process.env,
     GIT_CONFIG_SYSTEM: config.gitConfigSystem,
   };
-  const agentboxTestEnvironment = [
-    "DOCKER_HOST",
-    "TESTCONTAINERS_HOST_OVERRIDE",
-  ].flatMap((name) =>
+  const agentboxTestEnvironment = ["DOCKER_HOST"].flatMap((name) =>
     process.env[name] === undefined
       ? []
       : [`--test_env=${name}=${process.env[name]}`],

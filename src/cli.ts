@@ -17,8 +17,13 @@ import {
   PROMPTED_SECRETS,
 } from "./config.js";
 import { exportAwsCredentials, readSecrets } from "./credentials.js";
-import { RestrictedDockerProxy } from "./docker-proxy.js";
 import { AgentboxError, fail } from "./errors.js";
+import {
+  ensureLimaDockerBackend,
+  limaBackendStatus,
+  resetLimaDockerBackend,
+  stopLimaDockerBackend,
+} from "./lima-backend.js";
 import {
   loadPolicy,
   printableEmbeddedPolicy,
@@ -73,6 +78,7 @@ type ParsedArguments = {
   yes: boolean;
   help: boolean;
   version: boolean;
+  dockerAction?: "start" | "status" | "stop" | "reset";
   command: string[];
 };
 
@@ -89,6 +95,10 @@ Options:
       --settings PATH     Use an SRT JSON policy instead of the embedded policy
       --print-settings    Print the embedded SRT policy and exit
       --print-config      Print a commented TOML config example and exit
+      --docker-start      Start or verify the shared Lima Docker backend
+      --docker-status     Show the shared Docker backend status
+      --docker-stop       Stop the shared Docker backend
+      --docker-reset      Delete the backend, including images and volumes
   -y, --yes               Skip the launch confirmation
   -h, --help              Show this help
   -v, --version           Show the version
@@ -138,7 +148,19 @@ export function parseArguments(argv: readonly string[]): ParsedArguments {
     else if (argument === "-y" || argument === "--yes") parsed.yes = true;
     else if (argument === "--print-settings") parsed.printSettings = true;
     else if (argument === "--print-config") parsed.printConfig = true;
-    else if (
+    else if (argument.startsWith("--docker-")) {
+      const action = argument.slice("--docker-".length);
+      if (
+        !(["start", "status", "stop", "reset"] as const).includes(
+          action as "start" | "status" | "stop" | "reset",
+        )
+      ) {
+        fail(`unknown option ${argument}; put child options after --`);
+      }
+      if (parsed.dockerAction)
+        fail("only one Docker backend action may be specified");
+      parsed.dockerAction = action as ParsedArguments["dockerAction"];
+    } else if (
       argument === "-c" ||
       argument === "--config" ||
       argument.startsWith("--config=")
@@ -249,11 +271,17 @@ async function launch(
   prepareRuntimeDirectories();
   let compatibility:
     Awaited<ReturnType<typeof prepareBazelCompatibility>> | undefined;
-  let dockerProxy: RestrictedDockerProxy | undefined;
 
   try {
-    dockerProxy = await RestrictedDockerProxy.startIfAvailable();
-    if (dockerProxy) Object.assign(environment, dockerProxy.environment);
+    const dockerEnvironment = await ensureLimaDockerBackend();
+    if (dockerEnvironment) {
+      // These Docker CLI settings can override or conflict with DOCKER_HOST.
+      // The backend endpoint is the only daemon an agentbox launch may use.
+      delete environment.DOCKER_CONTEXT;
+      delete environment.DOCKER_TLS_VERIFY;
+      delete environment.DOCKER_CERT_PATH;
+      Object.assign(environment, dockerEnvironment);
+    }
     await SandboxManager.initialize(policy.config);
     compatibility = prepareBazelCompatibility(environment.PATH ?? "");
     Object.assign(environment, compatibility.environment);
@@ -291,9 +319,44 @@ async function launch(
   } finally {
     SandboxManager.cleanupAfterCommand();
     compatibility?.close();
-    await dockerProxy?.close();
     await SandboxManager.reset();
   }
+}
+
+async function runDockerAction(
+  action: NonNullable<ParsedArguments["dockerAction"]>,
+): Promise<number> {
+  if (action === "start") {
+    const environment = await ensureLimaDockerBackend();
+    if (!environment)
+      fail("Lima is not installed; on macOS, run: brew install lima");
+    console.log(`Docker backend ready at ${environment.DOCKER_HOST}`);
+    return 0;
+  }
+  if (action === "status") {
+    const status = await limaBackendStatus();
+    if (!status.installed) {
+      console.log("Docker backend unavailable: Lima is not installed");
+      return 0;
+    }
+    const detail = status.state?.message ? ` (${status.state.message})` : "";
+    console.log(
+      `Docker backend ${status.running ? "running" : (status.state?.status ?? "stopped")}${detail}`,
+    );
+    console.log(`Log: ${status.log}`);
+    return 0;
+  }
+  if (action === "stop") {
+    console.log(
+      (await stopLimaDockerBackend())
+        ? "Docker backend stopped"
+        : "Docker backend is not running",
+    );
+    return 0;
+  }
+  await resetLimaDockerBackend();
+  console.log("Docker backend reset; images, containers, and volumes removed");
+  return 0;
 }
 
 export async function run(argv = process.argv.slice(2)): Promise<number> {
@@ -314,6 +377,11 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
   if (args.printConfig) {
     process.stdout.write(EXAMPLE_CONFIG);
     return 0;
+  }
+  if (args.dockerAction) {
+    if (args.command.length > 0)
+      fail(`--docker-${args.dockerAction} cannot be combined with a command`);
+    return runDockerAction(args.dockerAction);
   }
   if (args.command.length === 0) {
     fail("a command is required; pass it after --");
@@ -394,8 +462,8 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
 let isMain = false;
 if (process.argv[1] !== undefined) {
   try {
-    // npm exposes package bins as symlinks. Compare their real paths so the CLI
-    // starts both via `node dist/cli.js` and via an installed `agentbox` link.
+    // Keep the compiled module directly runnable for checkout-based workflows;
+    // the package's stable bin wrapper calls main() explicitly instead.
     isMain =
       realpathSync(fileURLToPath(import.meta.url)) ===
       realpathSync(process.argv[1]);
@@ -404,8 +472,8 @@ if (process.argv[1] !== undefined) {
   }
 }
 
-if (isMain) {
-  run().then(
+export function main(argv = process.argv.slice(2)): void {
+  run(argv).then(
     (exitCode) => {
       process.exitCode = exitCode;
     },
@@ -421,3 +489,5 @@ if (isMain) {
     },
   );
 }
+
+if (isMain) main();

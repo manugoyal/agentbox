@@ -34,6 +34,16 @@ test("requires child options to appear after the separator", () => {
   );
 });
 
+test("parses Docker backend lifecycle actions separately from commands", () => {
+  assert.equal(parseArguments(["--docker-status"]).dockerAction, "status");
+  assert.throws(
+    () => parseArguments(["--docker-start", "--docker-stop"]),
+    (error) =>
+      error instanceof AgentboxError &&
+      error.message === "only one Docker backend action may be specified",
+  );
+});
+
 test("the sandbox-side runner preserves argv without shell parsing", () => {
   const expected = ["spaces here", "single'quote", "!bang", ""];
   const command = [

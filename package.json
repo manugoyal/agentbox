@@ -4,19 +4,21 @@
   "description": "Run coding agents with explicit credentials inside Anthropic Sandbox Runtime",
   "type": "module",
   "bin": {
-    "agentbox": "dist/cli.js"
+    "agentbox": "bin/agentbox.js"
   },
   "files": [
+    "bin",
     "dist",
     "LICENSE",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "npm run clean && tsc",
     "check": "tsc --noEmit",
+    "clean": "node scripts/clean.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "install:global": "npm run build && npm install --global .",
+    "install:global": "npm run build && npm install --global --install-links .",
     "prepack": "npm run build",
     "test": "npm run build && node --test test/*.test.js"
   },

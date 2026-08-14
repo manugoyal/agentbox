@@ -25,8 +25,8 @@ The following tools are optional:
   when selecting an AWS profile.
 - [1Password CLI](https://www.1password.dev/cli/get-started) when injecting
   secrets. `op` must be signed in on the host.
-- A local Docker Engine when running tests or development tools that launch
-  containers.
+- [Lima](https://lima-vm.io/) when running tests or development tools that
+  launch Docker containers. On macOS, install it with `brew install lima`.
 
 ## Build and install from a checkout
 
@@ -38,20 +38,18 @@ npm run install:global
 ```
 
 This does not publish anything. `npm install` installs the pinned runtime and
-development dependencies. `install:global` explicitly compiles `src/` into
-`dist/` before asking npm to install the local package globally. That explicit
-build is important because npm may implement a global install from a local
-directory as a link to the checkout without running its package lifecycle
-scripts. Verify the installation with:
+development dependencies. `install:global` compiles `src/`, then asks npm to
+pack and install an independent snapshot of the checkout. Later edits and
+builds in the checkout do not affect the installed command. Verify the
+installation with:
 
 ```sh
 agentbox --version
 ```
 
-Run `npm run install:global` again whenever you want to reliably refresh the
-global command. If npm linked the checkout, `npm run build` alone is enough
-after TypeScript-only changes. Remove the installation with
-`npm uninstall --global agentbox`.
+Run `npm run install:global` again whenever you want to replace the global
+command with a new snapshot. Remove the installation with `npm uninstall
+--global agentbox`.
 
 ### Work directly from the checkout
 
@@ -105,14 +103,26 @@ is authoritative: credentials it omits are neither prompted for nor granted.
 The embedded policy restricts filesystem access and uses one explicit network
 allowlist; unmatched destinations are denied. Review the policy and the scope of
 any credentials you inject, because full-allow mode is only as safe as those
-boundaries. If a local Docker Engine is available, agentbox exposes a restricted
-per-session subset of the standard Docker API for ordinary container workflows.
-Arbitrary public images may run, but the raw daemon socket, host resources,
-privileged settings, other sessions, and daemon-wide administration stay out of
-reach. Workload containers can communicate within the session but have no route
-to external networks. Published TCP ports remain available on localhost; UDP and
-SCTP publication is rejected. On macOS, agentbox runs Bazel in batch mode so the
-build itself stays inside the sandbox while its on-disk caches remain reusable.
+boundaries. On macOS, agentbox runs Bazel in batch mode so the build itself stays
+inside the sandbox while its on-disk caches remain reusable.
+
+When Lima is installed, agentbox maintains one shared Docker VM. Docker is
+unrestricted inside that VM, while the VM has no host filesystem mounts and its
+Lima hostagent and network run in a separate, long-lived SRT sandbox. Containers
+have no direct external network access; image pulls use the same explicit domain
+allowlist as other agentbox tools. Agentbox does not inject credentials into
+Docker automatically. All agentbox invocations share the VM's containers,
+images, volumes, and build cache, so concurrent invocations can interfere with
+one another. The first start downloads and provisions the VM.
+
+Manage the backend with:
+
+```sh
+agentbox --docker-start
+agentbox --docker-status
+agentbox --docker-stop
+agentbox --docker-reset  # Deletes containers, images, volumes, and build cache.
+```
 
 Run agentbox on the host rather than from another sandbox. AWS SSO, for example,
 may need to refresh files under `~/.aws/sso/cache` before agentbox exports its

@@ -122,6 +122,23 @@ export const EMBEDDED_POLICY = {
       "formulae.brew.sh",
       "ghcr.io",
       "*.ghcr.io",
+      // Container engines, VM images, and registries used by the optional
+      // shared Lima Docker backend.
+      "docker.com",
+      "*.docker.com",
+      "docker.io",
+      "*.docker.io",
+      "ubuntu.com",
+      "*.ubuntu.com",
+      "canonical.com",
+      "*.canonical.com",
+      "quay.io",
+      "*.quay.io",
+      "gcr.io",
+      "*.gcr.io",
+      "pkg.dev",
+      "*.pkg.dev",
+      "*.cloudflarestorage.com",
       // Cloud and observability services.
       "*.amazonaws.com",
       "*.amazon.com",
@@ -163,9 +180,17 @@ export const EMBEDDED_POLICY = {
     // Go asks trustd to verify certificates. Without this Mach lookup, gh and
     // Terraform report misleading TLS or authentication failures on macOS.
     allowMachLookup: ["com.apple.trustd.agent"],
-    // Unix sockets stay blocked. Agentbox's restricted Docker API is a
-    // host-side localhost proxy; the raw daemon socket never crosses this
-    // boundary because it would bypass the filesystem and network policy.
+    // Some development tools use Unix sockets for private, same-process-tree
+    // IPC. In particular, tsx creates a temporary socket beneath TMPDIR, which
+    // SRT sets to /tmp/claude. Limit that permission to SRT's dedicated temp
+    // subtree: allowing all of /tmp could expose unrelated host services (for
+    // example an SSH agent), while allowing every Unix socket could expose the
+    // raw host Docker daemon and bypass agentbox's Lima VM boundary.
+    //
+    // SRT can enforce this path allowlist on macOS. On Linux its seccomp filter
+    // cannot inspect socket paths, so allowUnixSockets is intentionally ignored
+    // and Unix sockets remain blocked unless allowAllUnixSockets is enabled.
+    allowUnixSockets: ["/tmp/claude"],
     allowAllUnixSockets: false,
   },
   ignoreViolations: {},
