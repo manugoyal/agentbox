@@ -34,6 +34,7 @@ export const EMBEDDED_POLICY = {
       "~/.cache",
       "~/Library/Caches",
       "~/.gitconfig",
+      "~/.config/git/ignore",
       "~/.zshenv",
       "~/.zprofile",
       "~/.zshrc",
