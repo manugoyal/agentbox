@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +9,7 @@ type ShimConfig = {
   bazelExecutable: string;
   gitConfigSystem: string;
   outputUserRoot: string;
+  usedMarker: string;
 };
 
 // Keep the temporary shim self-contained. It is copied out of dist/ at runtime,
@@ -54,6 +55,7 @@ function loadConfig(): ShimConfig {
     "bazelExecutable",
     "gitConfigSystem",
     "outputUserRoot",
+    "usedMarker",
   ] as const) {
     if (typeof values[name] !== "string" || !values[name]) {
       throw new Error(`invalid agentbox Bazel shim config: ${name}`);
@@ -65,6 +67,7 @@ function loadConfig(): ShimConfig {
 async function main(): Promise<number> {
   const config = loadConfig();
   const userArguments = process.argv.slice(2);
+  writeFileSync(config.usedMarker, "", { flag: "a", mode: 0o600 });
   const bazelEnvironment = {
     ...process.env,
     GIT_CONFIG_SYSTEM: config.gitConfigSystem,
@@ -90,7 +93,7 @@ async function main(): Promise<number> {
     config.bazelExecutable,
     [
       `--output_user_root=${config.outputUserRoot}`,
-      "--batch",
+      "--max_idle_secs=300",
       "--host_jvm_args=-Djava.net.preferIPv4Stack=true",
       ...effectiveArguments,
     ],

@@ -29,6 +29,7 @@ import {
   printableEmbeddedPolicy,
   type LoadedPolicy,
 } from "./policy.js";
+import { allowUnrestrictedMacOSIpEgress } from "./seatbelt.js";
 import {
   ensureDirectory,
   isUsableDirectory,
@@ -288,6 +289,11 @@ async function launch(
     environment.AGENTBOX_INTERNAL_COMMAND = Buffer.from(
       JSON.stringify(command),
     ).toString("base64url");
+    if (compatibility.cleanup) {
+      environment.AGENTBOX_INTERNAL_BAZEL_CLEANUP = Buffer.from(
+        JSON.stringify(compatibility.cleanup),
+      ).toString("base64url");
+    }
     environment.AGENTBOX_INTERNAL_NODE = process.execPath;
     environment.AGENTBOX_INTERNAL_RUNNER = fileURLToPath(
       new URL("./child-runner.js", import.meta.url),
@@ -301,19 +307,22 @@ async function launch(
     // SRT's POSIX API currently accepts a command string. Keep that string
     // constant and carry the user's argv out-of-band; child-runner decodes it
     // and uses spawn(shell:false), so no user argument is ever shell-parsed.
-    const { argv, env } = await SandboxManager.wrapWithSandboxArgv(
+    const wrapped = await SandboxManager.wrapWithSandboxArgv(
       'exec "$AGENTBOX_INTERNAL_NODE" "$AGENTBOX_INTERNAL_RUNNER"',
       "/bin/bash",
       undefined,
       undefined,
       process.cwd(),
     );
+    const argv = policy.unrestrictedIpEgress
+      ? allowUnrestrictedMacOSIpEgress(wrapped.argv)
+      : wrapped.argv;
     const executable = argv[0];
     if (!executable) fail("srt produced an empty sandbox command");
 
     return await runChild(executable, argv.slice(1), {
       cwd: process.cwd(),
-      env,
+      env: wrapped.env,
       stdio: "inherit",
     });
   } finally {

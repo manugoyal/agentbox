@@ -71,110 +71,13 @@ export const EMBEDDED_POLICY = {
     ],
   },
   network: {
-    // This is a pragmatic allowlist of providers and ecosystems we trust tools
-    // to use, and is intentionally generous within those boundaries. Allow an
-    // exact registrable domain when only its apex is needed. When we trust an
-    // organization's full service namespace, prefer a wildcard immediately
-    // beneath that domain; add the apex separately when it is also needed (SRT
-    // wildcards do not match it). Use narrower hostnames for multi-tenant
-    // infrastructure when practical. Avoid arbitrary end-user domains and
-    // blanket suffixes such as "*.com".
-    //
-    // Provider trust is not the same as origin ownership: multi-tenant hosts
-    // such as object storage can serve content controlled by their customers.
-    // This policy accepts that tradeoff for useful development infrastructure;
-    // filesystem restrictions and narrowly scoped credentials remain essential.
-    allowedDomains: [
-      // Agent APIs and authentication.
-      "*.anthropic.com",
-      "claude.ai",
-      "*.claude.ai",
-      "claude.com",
-      "*.claude.com",
-      "openai.com",
-      "*.openai.com",
-      "chatgpt.com",
-      "*.chatgpt.com",
-      // Source hosting.
-      "github.com",
-      "*.github.com",
-      "*.windows.net",
-      "*.githubusercontent.com",
-      "*.github.io",
-      // Package registries and tool downloads.
-      "registry.npmjs.org",
-      "*.npmjs.org",
-      "*.duckdb.org",
-      "*.crates.io",
-      "pypi.org",
-      "*.pypi.org",
-      "files.pythonhosted.org",
-      "*.pythonhosted.org",
-      "astral.sh",
-      "*.astral.sh",
-      "*.jdx.dev",
-      "*.rust-lang.org",
-      "nodejs.org",
-      "bcr.bazel.build",
-      "registry.terraform.io",
-      "releases.hashicorp.com",
-      "*.hashicorp.com",
-      "formulae.brew.sh",
-      "ghcr.io",
-      "*.ghcr.io",
-      // Container engines, VM images, and registries used by the optional
-      // shared Lima Docker backend.
-      "docker.com",
-      "*.docker.com",
-      "docker.io",
-      "*.docker.io",
-      "ubuntu.com",
-      "*.ubuntu.com",
-      "canonical.com",
-      "*.canonical.com",
-      "quay.io",
-      "*.quay.io",
-      "gcr.io",
-      "*.gcr.io",
-      "pkg.dev",
-      "*.pkg.dev",
-      "*.cloudflarestorage.com",
-      // Cloud and observability services.
-      "*.amazonaws.com",
-      "*.amazon.com",
-      "*.cloudfront.net",
-      "googleapis.com",
-      "*.googleapis.com",
-      "*.gstatic.com",
-      "datadoghq.com",
-      "*.datadoghq.com",
-      "datadoghq.eu",
-      "*.datadoghq.eu",
-      "ddog-gov.com",
-      "*.ddog-gov.com",
-      "braintrust.dev",
-      "*.braintrust.dev",
-      "braintrustdata.com",
-      "*.braintrustdata.com",
-      "1password.com",
-      "*.1password.com",
-      // Documentation commonly fetched by coding agents.
-      "*.python.org",
-      "*.readthedocs.io",
-      "readthedocs.io",
-      "developer.mozilla.org",
-      "stackoverflow.com",
-      "*.stackoverflow.com",
-      "*.stackexchange.com",
-      "*.wikipedia.org",
-      "opentelemetry.io",
-      "*.opentelemetry.io",
-      "deepwiki.com",
-    ],
+    // Keep SRT's restricted-network profile so Unix-domain sockets remain
+    // path-scoped below. Agentbox separately adds direct outbound IP access on
+    // macOS for build tools that clear proxy variables. The wildcard keeps
+    // proxy-aware tools unrestricted too.
+    allowedDomains: ["*"],
     deniedDomains: [],
-    // Agentbox deliberately has one network model: destinations must match the
-    // explicit list above. No permission callback is installed, and this flag
-    // prevents a future callback from accidentally weakening that invariant.
+    // No permission callback is installed. Make the wildcard deterministic.
     strictAllowlist: true,
     allowLocalBinding: true,
     // Go asks trustd to verify certificates. Without this Mach lookup, gh and
@@ -190,7 +93,9 @@ export const EMBEDDED_POLICY = {
     // SRT can enforce this path allowlist on macOS. On Linux its seccomp filter
     // cannot inspect socket paths, so allowUnixSockets is intentionally ignored
     // and Unix sockets remain blocked unless allowAllUnixSockets is enabled.
-    allowUnixSockets: ["/tmp/claude"],
+    // Direct IP egress resolves names through macOS's fixed DNS socket. This
+    // exposes only the system resolver, not arbitrary host service sockets.
+    allowUnixSockets: ["/tmp/claude", "/private/var/run/mDNSResponder"],
     allowAllUnixSockets: false,
   },
   ignoreViolations: {},
@@ -201,6 +106,7 @@ export const EMBEDDED_POLICY = {
 export type LoadedPolicy = {
   config: SandboxRuntimeConfig;
   label: string;
+  unrestrictedIpEgress: boolean;
 };
 
 function cloneEmbeddedPolicy(): SandboxRuntimeConfig {
@@ -267,10 +173,17 @@ export function loadPolicy(
     }
   }
 
-  // Keep the network policy deterministic even when a custom settings file
-  // omits the flag. Agentbox never installs SRT's "ask" callback, so unmatched
-  // hosts would still be denied; making it explicit guards that design choice.
+  // Keep custom network policy deterministic. Agentbox never installs SRT's
+  // "ask" callback, so unmatched hosts are denied when a custom allowlist is
+  // supplied.
   config.network.strictAllowlist = true;
+
+  // A wildcard with no denies is the explicit opt-in to direct IP egress.
+  // Custom SRT settings can retain domain filtering by supplying a narrower
+  // allowlist or any deny rule.
+  const unrestrictedIpEgress =
+    config.network.allowedDomains.includes("*") &&
+    config.network.deniedDomains.length === 0;
 
   // All runtime modules live together in dist/. Protecting that directory
   // prevents a child launched from the agentbox source tree from rewriting the
@@ -280,7 +193,7 @@ export function loadPolicy(
   config.filesystem.allowRead.push(runtimeDirectory);
   config.filesystem.denyWrite.push(runtimeDirectory);
 
-  return { config, label };
+  return { config, label, unrestrictedIpEgress };
 }
 
 export function printableEmbeddedPolicy(): string {

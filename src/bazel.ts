@@ -14,18 +14,25 @@ import { findExecutable } from "./system.js";
 
 export type BazelCompatibility = {
   environment: Record<string, string>;
+  cleanup:
+    | {
+        command: readonly string[];
+        marker: string;
+      }
+    | undefined;
   close(): void;
 };
 
 const NO_BAZEL_COMPATIBILITY: BazelCompatibility = {
   environment: {},
+  cleanup: undefined,
   close() {},
 };
 
 /**
  * Put a small Bazel argv shim first on PATH on macOS.
  *
- * Why batch mode is necessary here:
+ * Why the server is scoped to one agentbox launch:
  *
  * - Normal Bazel is a native client connected over localhost gRPC to a
  *   persistent Java server. SRT's macOS Seatbelt profile intentionally lets a
@@ -34,30 +41,26 @@ const NO_BAZEL_COMPATIBILITY: BazelCompatibility = {
  *   sandboxed client. It would also be unsafe: that server would execute build
  *   actions outside the filesystem sandbox.
  * - A server started by one agentbox invocation is not reusable by another
- *   invocation either. Each has a distinct Seatbelt sandbox and SRT proxy, so
- *   sharing a persistent server introduces process-verification failures,
- *   output-base locking, dead proxy endpoints, and ambiguous ownership of
- *   server shutdown.
+ *   invocation either. Each has a distinct Seatbelt sandbox, so sharing a
+ *   persistent server introduces process-verification failures and, more
+ *   importantly, lets a later sandbox execute through an earlier one.
  *
- * `--batch` avoids the client/server boundary. Bazel starts one Java process
- * for the command and waits for it to exit. Because the native launcher itself
- * runs inside SRT, that Java process and all build actions inherit the same OS
- * sandbox. Simultaneous batch invocations using one output base retain Bazel's
- * normal queueing semantics instead of trying to own one persistent server.
+ * The shim therefore starts a normal Bazel server inside the current Seatbelt
+ * sandbox and reuses it for every Bazel command issued by the sandboxed child.
+ * The sandbox-side runner shuts it down before that child exits. A short Bazel
+ * idle timeout is only a fallback for an unclean agentbox termination.
  *
- * Batch mode still uses the on-disk output tree, action cache, repository
- * cache, and any project-configured disk/remote cache. A stable agentbox-only
- * `output_user_root` preserves that state across launches while ensuring a
- * batch invocation never finds or kills a host Bazel server. What batch mode
- * deliberately gives up is the Java server's in-memory loading and analysis
- * cache; that is the performance tradeoff for this much simpler lifecycle.
+ * A stable agentbox-only `output_user_root` preserves the on-disk output tree,
+ * action cache, repository cache, and any project-configured disk/remote cache
+ * across launches while ensuring agentbox never finds or controls the user's
+ * host Bazel server. Only the in-memory server state is launch-scoped.
  *
  * One networking detail remains. SRT's macOS proxy listens on native IPv4.
  * Modern Java may represent a connection to 127.0.0.1 as IPv4-mapped IPv6,
  * which Seatbelt's safe localhost rule does not match. SRT normally injects
  * `-Djava.net.preferIPv4Stack=true` via JAVA_TOOL_OPTIONS, but Bazel strips that
  * variable while launching Java. Passing the same property as a Bazel startup
- * option makes the batch JVM connect to SRT's ordinary authenticated proxy over
+ * option makes the server JVM connect to SRT's ordinary authenticated proxy over
  * native IPv4. No custom relay or network-policy exception is needed.
  *
  * Bazel also constructs a fresh environment for test actions rather than
@@ -74,7 +77,7 @@ const NO_BAZEL_COMPATIBILITY: BazelCompatibility = {
  * negotiation that ends with the misleading `Proxy CONNECT aborted` error.
  *
  * GIT_CONFIG_SYSTEM is not among the variables Bazel clears. The shim points it
- * at a temporary config containing the same setting, scoped to this one batch
+ * at a temporary config containing the same setting, scoped to this one agentbox
  * invocation. The config includes Git's normal /etc/gitconfig first and does
  * not replace the user's global or repository config. This is independent of
  * PATH ordering and requires no interception of the Git executable itself.
@@ -99,6 +102,7 @@ export function prepareBazelCompatibility(
     symlinkSync("bazel.mjs", shimPath);
 
     const gitConfigSystem = join(shimDirectory, "gitconfig");
+    const usedMarker = join(shimDirectory, "bazel-used");
     writeFileSync(
       gitConfigSystem,
       "[include]\n\tpath = /etc/gitconfig\n[http]\n\tproxyAuthMethod = basic\n",
@@ -111,12 +115,17 @@ export function prepareBazelCompatibility(
         bazelExecutable: bazel,
         gitConfigSystem,
         outputUserRoot: join(homedir(), ".cache", "agentbox", "bazel"),
+        usedMarker,
       })}\n`,
       { mode: 0o600 },
     );
 
     return {
       environment: { PATH: `${shimDirectory}${delimiter}${basePath}` },
+      cleanup: {
+        command: [shimPath, "shutdown"],
+        marker: usedMarker,
+      },
       close() {
         rmSync(shimDirectory, { recursive: true, force: true });
       },

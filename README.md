@@ -100,18 +100,21 @@ embedded SRT policy, and `agentbox --print-config` for a commented config
 example. The default config path is `~/.config/agentbox.toml`. An existing config
 is authoritative: credentials it omits are neither prompted for nor granted.
 
-The embedded policy restricts filesystem access and uses one explicit network
-allowlist; unmatched destinations are denied. Review the policy and the scope of
-any credentials you inject, because full-allow mode is only as safe as those
-boundaries. On macOS, agentbox runs Bazel in batch mode so the build itself stays
-inside the sandbox while its on-disk caches remain reusable.
+The embedded policy restricts filesystem, process, Mach-service, and Unix-socket
+access. Outbound IP networking is unrestricted so build tools work even when
+they clear proxy environment variables. Review the policy and the scope of any
+credentials you inject: sandboxed code can send the workspace and injected
+credentials to arbitrary destinations. On macOS, agentbox gives each launch a
+sandboxed Bazel server and shuts it down before the sandbox exits. The server's
+in-memory state is reusable within that launch, while on-disk caches remain
+reusable across launches. Agentbox never connects to the host Bazel server.
 
 When Lima is installed, agentbox maintains one shared Docker VM. Docker is
 unrestricted inside that VM, while the VM has no host filesystem mounts and its
 Lima hostagent and network run in a separate, long-lived SRT sandbox. Containers
-have no direct external network access; image pulls use the same explicit domain
-allowlist as other agentbox tools. Agentbox does not inject credentials into
-Docker automatically. All agentbox invocations share the VM's containers,
+have external network access through that hostagent. Agentbox does not inject
+credentials into Docker automatically. All agentbox invocations share the VM's
+containers,
 images, volumes, and build cache, so concurrent invocations can interfere with
 one another. The first start downloads and provisions the VM.
 

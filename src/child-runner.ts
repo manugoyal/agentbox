@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 
+import { existsSync } from "node:fs";
+
 import { runChild } from "./child-process.js";
 
 const COMMAND_VARIABLE = "AGENTBOX_INTERNAL_COMMAND";
+const BAZEL_CLEANUP_VARIABLE = "AGENTBOX_INTERNAL_BAZEL_CLEANUP";
+
+type BazelCleanup = {
+  command: string[];
+  marker: string;
+};
 
 function requiredVariable(name: string): string {
   const value = process.env[name];
@@ -12,10 +20,12 @@ function requiredVariable(name: string): string {
 
 async function main(): Promise<number> {
   const encodedCommand = requiredVariable(COMMAND_VARIABLE);
+  const encodedBazelCleanup = process.env[BAZEL_CLEANUP_VARIABLE];
 
   // These values are launcher-to-runner transport, not part of the environment
   // contract presented to the user's command.
   delete process.env[COMMAND_VARIABLE];
+  delete process.env[BAZEL_CLEANUP_VARIABLE];
   delete process.env.AGENTBOX_INTERNAL_NODE;
   delete process.env.AGENTBOX_INTERNAL_RUNNER;
 
@@ -41,10 +51,58 @@ async function main(): Promise<number> {
   const [executable, ...args] = decoded;
   if (!executable) throw new Error("agentbox runner received an empty command");
 
-  return runChild(executable, args, {
-    env: process.env,
-    stdio: "inherit",
-  });
+  let bazelCleanup: BazelCleanup | undefined;
+  if (encodedBazelCleanup) {
+    const value: unknown = JSON.parse(
+      Buffer.from(encodedBazelCleanup, "base64url").toString(),
+    );
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !("command" in value) ||
+      !Array.isArray(value.command) ||
+      !value.command.every((argument) => typeof argument === "string") ||
+      !("marker" in value) ||
+      typeof value.marker !== "string"
+    ) {
+      throw new Error("agentbox runner received invalid Bazel cleanup state");
+    }
+    bazelCleanup = value as BazelCleanup;
+  }
+
+  try {
+    return await runChild(executable, args, {
+      env: process.env,
+      stdio: "inherit",
+    });
+  } finally {
+    if (bazelCleanup && existsSync(bazelCleanup.marker)) {
+      const [cleanupExecutable, ...cleanupArguments] = bazelCleanup.command;
+      if (cleanupExecutable) {
+        try {
+          const cleanupExitCode = await runChild(
+            cleanupExecutable,
+            cleanupArguments,
+            {
+              env: process.env,
+              stdio: "ignore",
+            },
+          );
+          if (cleanupExitCode !== 0) {
+            console.error(
+              `agentbox: warning: Bazel server shutdown exited ${cleanupExitCode}`,
+            );
+          }
+        } catch (error) {
+          console.error(
+            `agentbox: warning: could not shut down Bazel server: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    }
+  }
 }
 
 main().then(
