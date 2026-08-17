@@ -1,5 +1,15 @@
 #!/usr/bin/env node
 
+/**
+ * Minimal command runner on the sandboxed side of the SRT boundary.
+ *
+ * SRT's wrapper accepts a shell command, so the trusted launcher carries the
+ * user's argv in an internal environment value and always invokes this fixed
+ * program. The runner removes those transport values and uses `spawn` without
+ * a shell, preserving the exact argv without creating a command-injection path.
+ * It also owns cleanup that must happen before the sandbox disappears, notably
+ * shutting down a Bazel server created during the session.
+ */
 import { existsSync } from "node:fs";
 
 import { runChild } from "./child-process.js";

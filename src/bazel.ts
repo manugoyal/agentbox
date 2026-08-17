@@ -1,3 +1,24 @@
+/**
+ * Bazel compatibility for macOS sandbox launches.
+ *
+ * Bazel normally delegates work to a persistent Java server. Reusing a server
+ * started on the host would let build actions run outside Agentbox; reusing one
+ * from an earlier launch would cross two different Seatbelt sandboxes. Agentbox
+ * instead puts a small shim first on PATH. The shim selects an Agentbox-only
+ * output root, starts the server inside the current sandbox, and lets commands
+ * reuse it for the life of that launch. The sandbox-side runner shuts the server
+ * down at exit, with Bazel's idle timeout as crash recovery. On-disk build state
+ * remains reusable across launches.
+ *
+ * The same shim handles two narrower compatibility gaps: Bazel filters the
+ * environment seen by repository and test actions, so Agentbox explicitly
+ * preserves Git's proxy behavior and the isolated Docker endpoint where needed.
+ *
+ * Caveats: this applies only on macOS and only when `bazel` is resolved through
+ * PATH; an explicitly invoked Bazel binary bypasses the shim. Servers are not
+ * shared across Agentbox launches, and concurrent launches in the same checkout
+ * may contend for the same output base.
+ */
 import {
   chmodSync,
   copyFileSync,
@@ -29,59 +50,7 @@ const NO_BAZEL_COMPATIBILITY: BazelCompatibility = {
   close() {},
 };
 
-/**
- * Put a small Bazel argv shim first on PATH on macOS.
- *
- * Why the server is scoped to one agentbox launch:
- *
- * - Normal Bazel is a native client connected over localhost gRPC to a
- *   persistent Java server. SRT's macOS Seatbelt profile intentionally lets a
- *   process inspect and signal only processes in the same sandbox.
- * - A server started outside agentbox therefore cannot be verified by the
- *   sandboxed client. It would also be unsafe: that server would execute build
- *   actions outside the filesystem sandbox.
- * - A server started by one agentbox invocation is not reusable by another
- *   invocation either. Each has a distinct Seatbelt sandbox, so sharing a
- *   persistent server introduces process-verification failures and, more
- *   importantly, lets a later sandbox execute through an earlier one.
- *
- * The shim therefore starts a normal Bazel server inside the current Seatbelt
- * sandbox and reuses it for every Bazel command issued by the sandboxed child.
- * The sandbox-side runner shuts it down before that child exits. A short Bazel
- * idle timeout is only a fallback for an unclean agentbox termination.
- *
- * A stable agentbox-only `output_user_root` preserves the on-disk output tree,
- * action cache, repository cache, and any project-configured disk/remote cache
- * across launches while ensuring agentbox never finds or controls the user's
- * host Bazel server. Only the in-memory server state is launch-scoped.
- *
- * One networking detail remains. SRT's macOS proxy listens on native IPv4.
- * Modern Java may represent a connection to 127.0.0.1 as IPv4-mapped IPv6,
- * which Seatbelt's safe localhost rule does not match. SRT normally injects
- * `-Djava.net.preferIPv4Stack=true` via JAVA_TOOL_OPTIONS, but Bazel strips that
- * variable while launching Java. Passing the same property as a Bazel startup
- * option makes the server JVM connect to SRT's ordinary authenticated proxy over
- * native IPv4. No custom relay or network-policy exception is needed.
- *
- * Bazel also constructs a fresh environment for test actions rather than
- * passing through arbitrary launcher variables. When agentbox has made its
- * isolated Docker backend available, the shim explicitly carries DOCKER_HOST
- * into tests. It points at an agentbox-owned loopback listener; the host Docker
- * socket itself is never exposed to the Bazel process or test action.
- *
- * Bazel's built-in git_repository rule creates one more proxy wrinkle. SRT
- * puts `http.proxyAuthMethod=basic` in GIT_CONFIG_PARAMETERS so Git pre-sends
- * credentials to its authenticated localhost proxy. Bazel deliberately clears
- * that variable (along with the other repository-local GIT_* variables) before
- * each repository fetch. Apple Git then attempts a proxy authentication
- * negotiation that ends with the misleading `Proxy CONNECT aborted` error.
- *
- * GIT_CONFIG_SYSTEM is not among the variables Bazel clears. The shim points it
- * at a temporary config containing the same setting, scoped to this one agentbox
- * invocation. The config includes Git's normal /etc/gitconfig first and does
- * not replace the user's global or repository config. This is independent of
- * PATH ordering and requires no interception of the Git executable itself.
- */
+/** Install the launch-scoped Bazel shim and describe its eventual cleanup. */
 export function prepareBazelCompatibility(
   basePath: string,
 ): BazelCompatibility {

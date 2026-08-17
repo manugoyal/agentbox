@@ -1,5 +1,14 @@
 #!/usr/bin/env node
 
+/**
+ * Sandbox-side Bazel argv shim installed temporarily by `bazel.ts`.
+ *
+ * The shim preserves the user's Bazel arguments while selecting Agentbox's
+ * isolated output root and server lifetime. It also carries the isolated Docker
+ * endpoint into Bazel test actions and supplies compatibility environment that
+ * Bazel would otherwise discard. The file is deliberately self-contained
+ * because it is copied into a temporary directory and placed first on PATH.
+ */
 import { readFileSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
@@ -12,9 +21,8 @@ type ShimConfig = {
   usedMarker: string;
 };
 
-// Keep the temporary shim self-contained. It is copied out of dist/ at runtime,
-// so importing another package-relative module would make the copy depend on
-// the installed directory layout. This is the one small process helper it needs.
+// Importing another package-relative module would make the temporary copy
+// depend on the installed directory layout.
 function runCommand(
   executable: string,
   args: readonly string[],

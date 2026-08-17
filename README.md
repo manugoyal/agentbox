@@ -1,23 +1,55 @@
 # agentbox
 
-`agentbox` runs an explicitly named command inside [Anthropic Sandbox Runtime
-(SRT)](https://github.com/anthropic-experimental/sandbox-runtime). It is designed
-for coding agents that are most useful in full-allow mode: the agent can work
-freely inside the sandbox while SRT limits the files and network destinations it
-can reach.
+`agentbox` gives a coding agent broad authority over one checkout without giving
+it the same authority over the rest of the host. It runs an explicitly named
+command inside [Anthropic Sandbox Runtime
+(SRT)](https://github.com/anthropic-experimental/sandbox-runtime), with a small
+host environment and only the credentials the user selects.
 
-Agentbox passes through a small host-environment allowlist. It can also exchange
-an AWS profile for temporary credentials and resolve 1Password references on the
-host, so the sandbox never needs access to `~/.aws` or the 1Password client.
+The main command runs directly on the host under an OS sandbox, not inside a
+virtual machine. This keeps normal development workflows fast and makes the
+workspace feel native, while placing boundaries around host files, processes,
+credentials, and local services.
+
+## Security model
+
+Agentbox builds the sandbox from several independent layers:
+
+- **Filesystem and processes.** SRT gives the command read/write access to the
+  current checkout, temporary files, and selected development-tool state. The
+  rest of the home directory is denied by default, sensitive launcher settings
+  are protected from modification, and child processes inherit the same OS
+  sandbox. The agent is expected to have complete control of the checkout and
+  the other explicitly writable paths.
+- **Environment and credentials.** Agentbox constructs a new environment from a
+  small allowlist instead of inheriting the launcher's environment wholesale.
+  It resolves 1Password references and exchanges AWS profiles on the host, then
+  injects only the resulting values. The sandbox does not receive access to the
+  1Password session, `~/.aws`, SSH agent sockets, or other ambient credentials.
+  An injected credential is still a capability: its service-side permissions
+  remain the ultimate limit on what the agent can do with it.
+- **Network and host services.** Outbound IP networking, including loopback TCP,
+  is unrestricted so general development tools work without per-project network
+  configuration. Unix-domain sockets and macOS Mach services remain scoped;
+  this prevents ambient access to services such as the host Docker daemon or an
+  SSH agent. Because IP egress is unrestricted, sandboxed code can transmit any
+  workspace data or injected credential it can read.
+- **Docker.** Agentbox never grants access to the host Docker socket. When Lima
+  is available, it exposes an unrestricted Docker daemon inside a separate VM
+  with no host filesystem mounts. The agent may fully control that guest, but
+  that authority does not imply control of the host.
+
+This is a practical containment boundary for developer tooling, not a complete
+confidentiality boundary or a substitute for narrowly scoped credentials. The
+embedded policy is primarily exercised on macOS; custom SRT settings replace
+that policy and must be reviewed independently.
 
 ## Prerequisites
 
 Agentbox requires Node.js 20.11 or newer and the command you intend to run. SRT
 is installed automatically as an npm dependency; do not install it separately.
 
-On Linux, SRT also requires `bubblewrap`, `socat`, and `ripgrep`. The embedded
-policy is primarily exercised on macOS, so review it before relying on another
-platform.
+On Linux, SRT also requires `bubblewrap`, `socat`, and `ripgrep`.
 
 The following tools are optional:
 
@@ -100,23 +132,16 @@ embedded SRT policy, and `agentbox --print-config` for a commented config
 example. The default config path is `~/.config/agentbox.toml`. An existing config
 is authoritative: credentials it omits are neither prompted for nor granted.
 
-The embedded policy restricts filesystem, process, Mach-service, and Unix-socket
-access. Outbound IP networking is unrestricted so build tools work even when
-they clear proxy environment variables. Review the policy and the scope of any
-credentials you inject: sandboxed code can send the workspace and injected
-credentials to arbitrary destinations. On macOS, agentbox gives each launch a
-sandboxed Bazel server and shuts it down before the sandbox exits. The server's
-in-memory state is reusable within that launch, while on-disk caches remain
-reusable across launches. Agentbox never connects to the host Bazel server.
+### Docker backend
 
 When Lima is installed, agentbox maintains one shared Docker VM. Docker is
 unrestricted inside that VM, while the VM has no host filesystem mounts and its
-Lima hostagent and network run in a separate, long-lived SRT sandbox. Containers
-have external network access through that hostagent. Agentbox does not inject
-credentials into Docker automatically. All agentbox invocations share the VM's
-containers,
-images, volumes, and build cache, so concurrent invocations can interfere with
-one another. The first start downloads and provisions the VM.
+host-side Lima processes run in a separate, long-lived SRT sandbox. Containers
+can use external networking, and published ports are reachable on the host.
+Agentbox does not inject credentials into Docker automatically. All agentbox
+invocations share the VM's containers, images, volumes, and build cache, so
+invocations can inspect or disrupt one another. The first start downloads and
+provisions the VM.
 
 Manage the backend with:
 
@@ -152,6 +177,23 @@ bearer_token_env_var = "DATADOG_SERVICE_ACCESS_TOKEN"
 Use the MCP endpoint for your Datadog site if it is not US1.
 
 ## Development
+
+The main security boundary is assembled in a few focused modules:
+
+- [`src/cli.ts`](src/cli.ts) owns the trusted host-side launch sequence and the
+  transition into SRT.
+- [`src/policy.ts`](src/policy.ts) defines the default filesystem and host-service
+  policy; [`src/seatbelt.ts`](src/seatbelt.ts) adds the macOS direct-IP rule.
+- [`src/credentials.ts`](src/credentials.ts) resolves selected credentials
+  without exposing their host-side stores.
+- [`src/bazel.ts`](src/bazel.ts) keeps Bazel's persistent server inside one
+  Agentbox launch.
+- [`src/lima-backend.ts`](src/lima-backend.ts) provides Docker through an isolated
+  and disposable VM rather than the host daemon.
+
+Each special-purpose module starts with its problem, isolation approach, and
+important caveats. The implementation should keep those headers current when a
+boundary changes.
 
 ```sh
 npm run format:check

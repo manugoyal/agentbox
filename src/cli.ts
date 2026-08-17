@@ -1,5 +1,18 @@
 #!/usr/bin/env node
 
+/**
+ * Agentbox's host-side orchestration entrypoint.
+ *
+ * The launcher resolves selected credentials, constructs a fresh child
+ * environment, loads the SRT policy, and prepares compatibility layers before
+ * entering the sandbox. Only the final command runner executes inside the main
+ * sandbox. Keeping credential stores and policy construction on the trusted
+ * side of that transition is a core part of the security boundary.
+ *
+ * The command's argv is transported as data and spawned without a shell. Once
+ * launched, the command and all of its descendants are governed by SRT; the
+ * launcher only waits for completion and tears down session-owned resources.
+ */
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";

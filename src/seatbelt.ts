@@ -1,18 +1,24 @@
+/**
+ * macOS network compatibility layered on top of SRT's generated Seatbelt
+ * profile.
+ *
+ * SRT's restricted-network mode normally relies on proxy environment variables.
+ * Build systems often create fresh environments that drop those variables, so
+ * Agentbox permits direct outbound IP connections instead. The added rule is
+ * deliberately limited to IP endpoints: using Seatbelt's broad `network*`
+ * permission would also expose every host Unix-domain socket and undermine the
+ * Docker and credential boundaries.
+ *
+ * This adapter depends on recognizable structure in SRT's generated profile and
+ * fails closed if that structure changes. Direct IP access includes arbitrary
+ * external destinations and loopback TCP services.
+ */
 const SANDBOX_EXECUTABLE = "/usr/bin/sandbox-exec";
 const NETWORK_MARKER = "; Network\n";
 const UNRESTRICTED_IP_EGRESS_RULE =
   '(allow network-outbound (remote ip "*:*"))';
 
-/**
- * Let sandboxed programs connect directly to arbitrary IP destinations while
- * retaining SRT's separate Unix-socket path allowlist.
- *
- * SRT intentionally routes restricted networking through an authenticated
- * localhost proxy. Some build tools construct a fresh environment and cannot
- * see those proxy variables. A filtered `remote ip` Seatbelt rule admits only
- * IP networking; unlike `(allow network*)`, it does not also grant access to
- * every host Unix-domain socket.
- */
+/** Add direct IP egress while retaining SRT's Unix-socket path allowlist. */
 export function allowUnrestrictedMacOSIpEgress(
   argv: readonly string[],
 ): string[] {

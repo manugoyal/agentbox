@@ -1,3 +1,16 @@
+/**
+ * Host-side credential brokering.
+ *
+ * Agentbox asks the host AWS and 1Password CLIs for only the credentials named
+ * by the user, validates the result, and passes the resulting environment
+ * values into the sandbox. The sandbox never needs the host credential stores
+ * or their ambient session state.
+ *
+ * This limits credential discovery, not credential authority. Once injected,
+ * a value is readable by sandboxed code and usable anywhere its service-side
+ * permissions allow, so callers should select short-lived, narrowly scoped
+ * credentials.
+ */
 import { fail } from "./errors.js";
 import { findExecutable, runChecked } from "./system.js";
 

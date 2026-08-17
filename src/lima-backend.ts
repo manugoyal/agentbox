@@ -1,35 +1,22 @@
 #!/usr/bin/env node
 
 /**
- * Persistent Docker backend isolated inside a Lima virtual machine.
+ * Docker compatibility without exposing the host Docker daemon.
  *
- * The Docker API is intentionally unrestricted. The coding agent may become
- * root in a container, mount the guest's `/`, reconfigure the guest daemon, or
- * otherwise take complete ownership of the VM. The security boundary is the
- * VM plus the SRT policy around Lima's host-side processes—not an incomplete
- * reimplementation of Docker's API.
+ * Access to a host Docker socket is effectively host-level access, so filtering
+ * individual Docker API calls is not a useful security boundary. Agentbox
+ * instead runs an unrestricted Docker daemon in a dedicated Lima VM created
+ * without host mounts. A credential-free supervisor keeps Lima's host-side
+ * processes inside their own long-lived SRT sandbox and exposes the guest daemon
+ * to Agentbox commands through a loopback TCP bridge. The host Docker socket,
+ * Lima state, and VM control sockets remain unavailable to the coding agent.
  *
- * One detached, credential-free Node supervisor owns the backend. It runs
- * `limactl start --foreground` as a direct SRT child so Lima's hostagent,
- * networking, port forwarders, and descendants retain the sandbox for the VM's
- * entire lifetime. On macOS, Virtualization.framework delegates the hardware
- * VM to Apple's separately sandboxed system XPC service; the supervisor grants
- * only that service lookup. The supervisor exposes the guest Docker socket as
- * a loopback-only TCP endpoint. Agentbox commands receive that endpoint through
- * DOCKER_HOST but cannot read Lima's home, disk, control sockets, or logs.
- *
- * Lima is created with `--mount-none`; Docker bind mounts therefore refer only
- * to paths inside the disposable guest. Lima's ordinary localhost port
- * forwarding makes ports published by guest containers reachable from
- * sandboxed clients without granting access to the host Docker daemon. Guest
- * traffic is still subject to SRT's network boundary: the daemon can pull
- * images through SRT's allowlisted proxy, while containers have no direct
- * host-network escape.
- *
- * All agentbox invocations share this daemon. That preserves images and build
- * caches, but it is not cross-session isolation: one invocation can inspect,
- * alter, or delete another invocation's Docker resources. The backend must
- * never be used as a secret store and is designed to be easily reset.
+ * The VM, not the Docker API, is the isolation boundary. Code may become root in
+ * the guest, mount the guest filesystem, reconfigure Docker, use external
+ * networking, and publish ports back to the host. The backend is also shared by
+ * every Agentbox launch: this preserves images and build caches, but provides no
+ * isolation between sessions. It must not be used as a secret store and is
+ * designed to be disposable through `agentbox --docker-reset`.
  */
 import { spawn, spawnSync } from "node:child_process";
 import {

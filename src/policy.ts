@@ -1,3 +1,17 @@
+/**
+ * The default SRT policy and the loader for user-supplied replacements.
+ *
+ * The embedded policy treats the current checkout and selected tool/cache
+ * directories as the writable development area while denying the rest of the
+ * user's home directory. Outbound IP networking is intentionally unrestricted,
+ * but Unix sockets and macOS Mach services remain narrow host-service
+ * boundaries. The runtime and launcher settings are protected so a sandboxed
+ * command cannot silently weaken a later launch.
+ *
+ * A custom settings file replaces the embedded policy rather than extending
+ * it. Callers should therefore treat custom settings as a complete security
+ * policy and review them independently.
+ */
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,11 +24,8 @@ import {
 import { fail } from "./errors.js";
 import { expandHome, findExecutable, runChecked } from "./system.js";
 
-// Reads are deny-then-allow and writes are allow-only. Denying the home
-// directory and adding back the handful of useful tool directories keeps
-// credential stores private by default, including ones added in the future.
-// Relative paths resolve against the launch directory, making the policy
-// project-neutral.
+// Reads are deny-then-allow and writes are allow-only. Relative paths resolve
+// against the launch directory, keeping the policy project-neutral.
 export const EMBEDDED_POLICY = {
   filesystem: {
     denyRead: [

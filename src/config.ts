@@ -1,3 +1,11 @@
+/**
+ * Strict parsing for Agentbox's small user-facing configuration surface.
+ *
+ * An existing config is authoritative: omitted credentials are not inferred or
+ * prompted for. Rejecting unknown keys and keeping secret references separate
+ * from plain environment values makes the launcher's granted capabilities
+ * visible and reviewable.
+ */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
