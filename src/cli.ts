@@ -79,6 +79,15 @@ const TOOL_CONFIG_DIRS = {
   DOCKER_CONFIG: join(homedir(), ".cache", "agentbox", "docker"),
   GH_CONFIG_DIR: join(homedir(), ".cache", "agentbox", "gh"),
   npm_config_cache: join(homedir(), ".cache", "agentbox", "npm"),
+  // pnpm otherwise checks whether its whole platform-specific home is
+  // writable. Agentbox deliberately exposes only the content-addressed store,
+  // not sibling global executables. Naming the store explicitly avoids pnpm's
+  // project-local fallback while retaining compatibility with node_modules
+  // trees created outside the sandbox.
+  npm_config_store_dir:
+    process.platform === "darwin"
+      ? join(homedir(), "Library", "pnpm", "store")
+      : join(homedir(), ".local", "share", "pnpm", "store"),
 } as const;
 
 type ParsedArguments = {

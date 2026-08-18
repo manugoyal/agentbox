@@ -44,6 +44,14 @@ export const EMBEDDED_POLICY = {
       "~/.rustup",
       "~/.cache",
       "~/Library/Caches",
+      // Reuse pnpm's content-addressed stores without exposing sibling global
+      // executables for writes.
+      "~/Library/pnpm/store",
+      "~/.local/share/pnpm/store",
+      // npm and pnpm use this for registry and store configuration. It is
+      // intentionally read-only; agents should not be able to persist changes
+      // to the user's package-manager defaults.
+      "~/.npmrc",
       "~/.gitconfig",
       "~/.config/git/ignore",
       "~/.zshenv",
@@ -60,11 +68,16 @@ export const EMBEDDED_POLICY = {
       "/dev/dtracehelper",
       "/dev/autofs_nowait",
       ".",
+      // Registry downloads and unpacked crate sources are shared with Cargo
+      // outside the sandbox. Keep Cargo config, credentials, and bin read-only.
+      "~/.cargo/registry",
       "~/.claude",
       "~/.claude.json",
       "~/.codex",
       "~/.cache",
       "~/Library/Caches",
+      "~/Library/pnpm/store",
+      "~/.local/share/pnpm/store",
       "/tmp",
       "/private/tmp",
       "/private/var/folders",
@@ -93,7 +106,14 @@ export const EMBEDDED_POLICY = {
     allowLocalBinding: true,
     // Go asks trustd to verify certificates. Without this Mach lookup, gh and
     // Terraform report misleading TLS or authentication failures on macOS.
-    allowMachLookup: ["com.apple.trustd.agent"],
+    allowMachLookup: [
+      "com.apple.trustd.agent",
+      // Directory fs.watch on macOS is implemented through FSEvents. Without
+      // this lookup libuv reports the service denial as the misleading EMFILE
+      // (too many open files). Seatbelt still applies the filesystem policy to
+      // the paths a process asks FSEvents to observe.
+      "com.apple.FSEvents",
+    ],
     // Some development tools use Unix sockets for private, same-process-tree
     // IPC. In particular, tsx creates a temporary socket beneath TMPDIR, which
     // SRT sets to /tmp/claude. Limit that permission to SRT's dedicated temp
