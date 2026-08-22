@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -8,6 +14,7 @@ import test from "node:test";
 import { parseArguments } from "../dist/cli.js";
 import { AgentboxConfig } from "../dist/config.js";
 import { AgentboxError } from "../dist/errors.js";
+import { loadPolicy } from "../dist/policy.js";
 import { allowUnrestrictedMacOSIpEgress } from "../dist/seatbelt.js";
 
 test("parses launcher options and leaves the complete child command alone", () => {
@@ -171,16 +178,55 @@ test("the sandbox-side runner performs marked Bazel cleanup", () => {
   }
 });
 
-test("config rejects unknown keys and accepts string tables", () => {
+test("config accepts filesystem grants and rejects unknown keys", () => {
   const directory = mkdtempSync(join(tmpdir(), "agentbox-test-"));
   try {
     const valid = join(directory, "valid.toml");
-    writeFileSync(valid, '[env]\nSERVICE_ORG = "example"\n');
-    assert.equal(new AgentboxConfig(valid, true).env.SERVICE_ORG, "example");
+    writeFileSync(
+      valid,
+      '[filesystem]\nread_only = ["../docs"]\nread_write = ["../repo"]\n\n[env]\nSERVICE_ORG = "example"\n',
+    );
+    const config = new AgentboxConfig(valid, true);
+    assert.equal(config.env.SERVICE_ORG, "example");
+    assert.deepEqual(config.filesystem.readOnly, ["../docs"]);
+    assert.deepEqual(config.filesystem.readWrite, ["../repo"]);
 
     const invalid = join(directory, "invalid.toml");
     writeFileSync(invalid, 'aws_proflie = "typo"\n');
     assert.throws(() => new AgentboxConfig(invalid, true), AgentboxError);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("filesystem grants extend the policy and preserve protected files", () => {
+  const directory = mkdtempSync(join(tmpdir(), "agentbox-test-"));
+  try {
+    const workspace = join(directory, "workspace");
+    const readOnly = join(directory, "reference");
+    const readWrite = join(directory, "sibling");
+    const configPath = join(readWrite, "agentbox.toml");
+    mkdirSync(workspace);
+    mkdirSync(readOnly);
+    mkdirSync(readWrite);
+
+    const policy = loadPolicy(undefined, workspace, {
+      filesystem: {
+        readOnly: ["../reference", readWrite],
+        readWrite: ["../sibling"],
+      },
+      protectedWritePaths: [configPath],
+    });
+
+    assert.deepEqual(policy.filesystemGrants, {
+      readOnly: [readOnly],
+      readWrite: [readWrite],
+    });
+    assert.ok(policy.config.filesystem.allowRead.includes(readOnly));
+    assert.ok(policy.config.filesystem.allowRead.includes(readWrite));
+    assert.ok(!policy.config.filesystem.allowWrite.includes(readOnly));
+    assert.ok(policy.config.filesystem.allowWrite.includes(readWrite));
+    assert.ok(policy.config.filesystem.denyWrite.includes(configPath));
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

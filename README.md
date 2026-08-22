@@ -132,6 +132,24 @@ embedded SRT policy, and `agentbox --print-config` for a commented config
 example. The default config path is `~/.config/agentbox.toml`. An existing config
 is authoritative: credentials it omits are neither prompted for nor granted.
 
+To let a sandbox work with directories outside the launch checkout, add explicit
+grants to that config:
+
+```toml
+[filesystem]
+read_only = ["../shared-docs"]
+read_write = ["../related-checkout"]
+```
+
+Paths may be absolute, start with `~/`, or be relative to the directory where
+Agentbox is launched. `read_write` also grants read access. These entries extend
+either the embedded or a custom SRT policy. Read grants can intentionally reopen
+a directory beneath a broadly denied parent such as the home directory, while
+specific write protections continue to take precedence. In particular, the
+active Agentbox config, custom SRT settings, and Agentbox runtime remain
+protected from writes. The resolved grants appear in the launch summary because
+each one deliberately widens the host filesystem visible to sandboxed code.
+
 ### Docker backend
 
 When Lima is installed, agentbox maintains one shared Docker VM. Docker is

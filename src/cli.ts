@@ -269,6 +269,12 @@ function printLaunchSummary(options: {
 }): void {
   console.log();
   console.log(`  srt settings   ${options.policy.label}`);
+  console.log(
+    `  filesystem ro  ${options.policy.filesystemGrants.readOnly.join(" ") || "(none)"}`,
+  );
+  console.log(
+    `  filesystem rw  ${options.policy.filesystemGrants.readWrite.join(" ") || "(none)"}`,
+  );
   console.log(`  aws profile    ${options.profile || "(none)"}`);
   console.log(`  aws identity   ${options.identity}`);
   console.log(
@@ -424,7 +430,10 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
   );
   const region = args.region ?? config.get("aws_region", "us-east-1");
   const settings = (args.settings ?? config.get("srt_settings")) || undefined;
-  const policy = loadPolicy(settings, process.cwd());
+  const policy = loadPolicy(settings, process.cwd(), {
+    filesystem: config.filesystem,
+    protectedWritePaths: [config.path],
+  });
 
   const readline = createInterface({
     input: process.stdin,

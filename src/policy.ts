@@ -137,7 +137,19 @@ export const EMBEDDED_POLICY = {
 export type LoadedPolicy = {
   config: SandboxRuntimeConfig;
   label: string;
+  filesystemGrants: {
+    readOnly: string[];
+    readWrite: string[];
+  };
   unrestrictedIpEgress: boolean;
+};
+
+export type PolicyAdditions = {
+  filesystem?: {
+    readOnly?: readonly string[];
+    readWrite?: readonly string[];
+  };
+  protectedWritePaths?: readonly string[];
 };
 
 function cloneEmbeddedPolicy(): SandboxRuntimeConfig {
@@ -162,6 +174,19 @@ function gitCommonDirectory(cwd: string): string | undefined {
   }
 }
 
+function resolveConfiguredPath(path: string, cwd: string): string {
+  return resolve(cwd, expandHome(path));
+}
+
+function appendUnique(paths: string[], additions: readonly string[]): void {
+  const known = new Set(paths);
+  for (const path of additions) {
+    if (known.has(path)) continue;
+    paths.push(path);
+    known.add(path);
+  }
+}
+
 /**
  * Load and finish the policy used for this session.
  *
@@ -172,12 +197,13 @@ function gitCommonDirectory(cwd: string): string | undefined {
 export function loadPolicy(
   settingsPath: string | undefined,
   cwd: string,
+  additions: PolicyAdditions = {},
 ): LoadedPolicy {
   let config: SandboxRuntimeConfig;
   let label: string;
 
   if (settingsPath) {
-    const path = resolve(expandHome(settingsPath));
+    const path = resolveConfiguredPath(settingsPath, cwd);
     let raw: string;
     try {
       raw = readFileSync(path, "utf8");
@@ -204,6 +230,31 @@ export function loadPolicy(
     }
   }
 
+  const readWrite = [
+    ...new Set(
+      (additions.filesystem?.readWrite ?? []).map((path) =>
+        resolveConfiguredPath(path, cwd),
+      ),
+    ),
+  ];
+  const readWriteSet = new Set(readWrite);
+  const readOnly = [
+    ...new Set(
+      (additions.filesystem?.readOnly ?? []).map((path) =>
+        resolveConfiguredPath(path, cwd),
+      ),
+    ),
+  ].filter((path) => !readWriteSet.has(path));
+
+  config.filesystem.allowRead ??= [];
+  appendUnique(config.filesystem.allowRead, [...readOnly, ...readWrite]);
+  appendUnique(config.filesystem.allowWrite, readWrite);
+
+  const protectedWritePaths = (additions.protectedWritePaths ?? []).map(
+    (path) => resolveConfiguredPath(path, cwd),
+  );
+  appendUnique(config.filesystem.denyWrite, protectedWritePaths);
+
   // Keep custom network policy deterministic. Agentbox never installs SRT's
   // "ask" callback, so unmatched hosts are denied when a custom allowlist is
   // supplied.
@@ -221,10 +272,15 @@ export function loadPolicy(
   // code or embedded policy used on its next launch.
   const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
   config.filesystem.allowRead ??= [];
-  config.filesystem.allowRead.push(runtimeDirectory);
-  config.filesystem.denyWrite.push(runtimeDirectory);
+  appendUnique(config.filesystem.allowRead, [runtimeDirectory]);
+  appendUnique(config.filesystem.denyWrite, [runtimeDirectory]);
 
-  return { config, label, unrestrictedIpEgress };
+  return {
+    config,
+    label,
+    filesystemGrants: { readOnly, readWrite },
+    unrestrictedIpEgress,
+  };
 }
 
 export function printableEmbeddedPolicy(): string {

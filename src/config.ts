@@ -50,6 +50,13 @@ aws_region = "us-east-1"
 # one from \`agentbox --print-settings\`.
 # srt_settings = "~/.srt.json"
 
+# Additional directories the sandbox may access. Relative paths are resolved
+# from the directory where agentbox is launched. A read_write grant also grants
+# read access. Specific write protections still take precedence.
+[filesystem]
+# read_only = ["../shared-docs"]
+# read_write = ["../related-checkout"]
+
 # Environment variables to inject from 1Password. A value may be an op:// path,
 # or $VAR naming a variable that holds one. The latter keeps references in your
 # shell profile and secret values in 1Password.
@@ -71,11 +78,24 @@ const environmentName = z
 
 const environmentTable = z.record(environmentName, z.string()).default({});
 
+const filesystemPath = z
+  .string()
+  .refine((value) => value.trim().length > 0, "path must not be empty");
+
+const filesystemTable = z
+  .object({
+    read_only: z.array(filesystemPath).default([]),
+    read_write: z.array(filesystemPath).default([]),
+  })
+  .strict()
+  .default({});
+
 const configSchema = z
   .object({
     aws_profile: z.string().optional(),
     aws_region: z.string().optional(),
     srt_settings: z.string().optional(),
+    filesystem: filesystemTable,
     secrets: environmentTable,
     env: environmentTable,
   })
@@ -95,6 +115,10 @@ export class AgentboxConfig {
   readonly path: string;
   readonly secrets: Record<string, string> = {};
   readonly env: Record<string, string> = {};
+  readonly filesystem = {
+    readOnly: [] as string[],
+    readWrite: [] as string[],
+  };
   readonly #values: Partial<Record<ConfigKey, string>> = {};
 
   constructor(path: string, required = false) {
@@ -133,6 +157,8 @@ export class AgentboxConfig {
 
     Object.assign(this.secrets, validated.secrets);
     Object.assign(this.env, validated.env);
+    this.filesystem.readOnly.push(...validated.filesystem.read_only);
+    this.filesystem.readWrite.push(...validated.filesystem.read_write);
     for (const key of Object.keys(CONFIG_ENV_VARS) as ConfigKey[]) {
       const value = validated[key];
       if (value !== undefined) this.#values[key] = value;
