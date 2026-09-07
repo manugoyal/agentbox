@@ -1,233 +1,166 @@
 import assert from "node:assert/strict";
 import {
   mkdirSync,
+  linkSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { parseArguments } from "../dist/cli.js";
 import { AgentboxConfig } from "../dist/config.js";
 import { AgentboxError } from "../dist/errors.js";
 import { loadPolicy } from "../dist/policy.js";
-import { allowUnrestrictedMacOSIpEgress } from "../dist/seatbelt.js";
+
+function fixture(t) {
+  const directory = mkdtempSync(join(tmpdir(), "agentbox-policy-test-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workspace = join(directory, "workspace");
+  mkdirSync(workspace);
+  return { directory, workspace };
+}
 
 test("parses launcher options and leaves the complete child command alone", () => {
   const parsed = parseArguments([
     "-y",
+    "--network=host",
     "--secret",
     "TOKEN=op://Vault/Item/value",
     "--",
-    "codex",
+    "agent",
     "--yolo",
     "a value with spaces",
   ]);
-
   assert.equal(parsed.yes, true);
+  assert.equal(parsed.network, "host");
   assert.deepEqual(parsed.secrets, ["TOKEN=op://Vault/Item/value"]);
-  assert.deepEqual(parsed.command, ["codex", "--yolo", "a value with spaces"]);
+  assert.deepEqual(parsed.command, ["agent", "--yolo", "a value with spaces"]);
+  assert.throws(
+    () => parseArguments(["--network", "unexpected"]),
+    /must be none or host/,
+  );
+  assert.throws(() => parseArguments(["--yolo"]), /put child options after --/);
+  assert.throws(() => parseArguments(["--docker-start"]), /unknown option/);
 });
 
-test("requires child options to appear after the separator", () => {
+test("config accepts explicit grants and aggregate limits, rejects mistakes and legacy policies", (t) => {
+  const { directory } = fixture(t);
+  const path = join(directory, "config.toml");
+  writeFileSync(
+    path,
+    'network = "host"\n[limits]\nmemory = "2G"\ntasks = 64\ncpu = 200\n[filesystem]\nread_only = ["../docs"]\nread_write = ["../repo"]\n[env]\nSERVICE_ORG = "example"\n',
+  );
+  const config = new AgentboxConfig(path, true);
+  assert.equal(config.network, "host");
+  assert.deepEqual(config.limits, { memory: "2G", tasks: 64, cpu: 200 });
+  assert.deepEqual(config.filesystem, {
+    readOnly: ["../docs"],
+    readWrite: ["../repo"],
+  });
+  assert.equal(config.env.SERVICE_ORG, "example");
+  for (const source of [
+    'aws_proflie = "typo"',
+    'srt_settings = "old.json"',
+    "[limits]\ntasks = 0",
+    '[limits]\nmemory = "infinity"',
+  ]) {
+    writeFileSync(path, source);
+    assert.throws(() => new AgentboxConfig(path, true), AgentboxError);
+  }
+});
+
+test("read-only grants cannot be reopened through aliases or child write grants", (t) => {
+  const { directory, workspace } = fixture(t);
+  const reference = join(directory, "reference");
+  mkdirSync(join(reference, "child"), { recursive: true });
+  symlinkSync(reference, join(directory, "alias"));
   assert.throws(
-    () => parseArguments(["--yolo"]),
-    (error) =>
-      error instanceof AgentboxError &&
-      error.message === "unknown option --yolo; put child options after --",
+    () =>
+      loadPolicy(undefined, workspace, {
+        filesystem: { readOnly: [reference], readWrite: ["../alias"] },
+      }),
+    /conflicts/,
+  );
+  assert.throws(
+    () =>
+      loadPolicy(undefined, workspace, {
+        filesystem: {
+          readOnly: [reference],
+          readWrite: [join(reference, "child")],
+        },
+      }),
+    /conflicts/,
+  );
+  for (const path of [
+    "/proc",
+    "/proc/self/root",
+    "/dev",
+    "/run",
+    "/sys",
+    "/",
+  ]) {
+    assert.throws(
+      () =>
+        loadPolicy(undefined, workspace, { filesystem: { readOnly: [path] } }),
+      /cannot grant/,
+    );
+  }
+});
+
+test("settings are strict and explicit CLI/config overrides win", (t) => {
+  const { directory, workspace } = fixture(t);
+  const settings = join(directory, "settings.json");
+  writeFileSync(
+    settings,
+    JSON.stringify({ network: "host", limits: { tasks: 24 } }),
+  );
+  const policy = loadPolicy(settings, workspace, {
+    network: "none",
+    limits: { memory: "1G" },
+  });
+  assert.equal(policy.network, "none");
+  assert.deepEqual(policy.limits, { tasks: 24, memory: "1G" });
+  writeFileSync(
+    settings,
+    JSON.stringify({
+      enableWeakerNestedSandbox: true,
+      filesystem: { allowWrite: ["/"] },
+    }),
+  );
+  assert.throws(
+    () => loadPolicy(settings, workspace),
+    /Legacy SRT policies must be migrated/,
   );
 });
 
-test(
-  "unrestricted macOS IP egress preserves Unix-socket restrictions",
-  { skip: process.platform !== "darwin" },
-  () => {
-    const profile = [
-      "(version 1)",
-      "(deny default)",
-      "; Network",
-      '(allow network-outbound (remote unix-socket (subpath "/tmp/claude")))',
-    ].join("\n");
-    const argv = [
-      "/usr/bin/env",
-      "/usr/bin/sandbox-exec",
-      "-p",
-      profile,
-      "/bin/bash",
-    ];
-
-    const result = allowUnrestrictedMacOSIpEgress(argv);
-    assert.match(result[3], /\(allow network-outbound \(remote ip "\*:\*"\)\)/);
-    assert.match(result[3], /remote unix-socket/);
-    assert.doesNotMatch(result[3], /\(allow network\*\)/);
-    assert.equal(argv[3], profile);
-
-    const wrapped = [
-      "/bin/bash",
-      "-c",
-      `'/usr/bin/sandbox-exec' '-p' '${profile}' '/bin/bash' '-c' 'true'`,
-    ];
-    const wrappedResult = allowUnrestrictedMacOSIpEgress(wrapped);
-    assert.match(
-      wrappedResult[2],
-      /\(allow network-outbound \(remote ip "\*:\*"\)\)/,
-    );
-  },
-);
-
-test("parses Docker backend lifecycle actions separately from commands", () => {
-  assert.equal(parseArguments(["--docker-status"]).dockerAction, "status");
-  assert.throws(
-    () => parseArguments(["--docker-start", "--docker-stop"]),
-    (error) =>
-      error instanceof AgentboxError &&
-      error.message === "only one Docker backend action may be specified",
+test("NUL-containing environment values cannot inject bubblewrap arguments", async (t) => {
+  const { workspace } = fixture(t);
+  const { launchSandbox } = await import("../dist/linux-sandbox.js");
+  await assert.rejects(
+    launchSandbox(loadPolicy(undefined, workspace), ["true"], {
+      INJECT: "value\0--bind\0/\0/",
+    }),
+    /invalid sandbox environment/,
   );
 });
 
-test("the sandbox-side runner preserves argv without shell parsing", () => {
-  const expected = ["spaces here", "single'quote", "!bang", ""];
-  const command = [
-    process.execPath,
-    "-e",
-    "process.stdout.write(JSON.stringify(process.argv.slice(1)))",
-    ...expected,
-  ];
-  const result = spawnSync(process.execPath, ["dist/child-runner.js"], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      AGENTBOX_INTERNAL_COMMAND: Buffer.from(JSON.stringify(command)).toString(
-        "base64url",
-      ),
-    },
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), expected);
-});
-
-test("the sandbox-side runner exposes SRT's proxy to npm installers", () => {
-  const command = [
-    process.execPath,
-    "-e",
-    "process.stdout.write(JSON.stringify({ https: process.env.npm_config_https_proxy, http: process.env.npm_config_http_proxy, proxy: process.env.npm_config_proxy }))",
-  ];
-  const environment = {
-    ...process.env,
-    HTTPS_PROXY: "http://localhost:41001",
-    HTTP_PROXY: "http://localhost:41002",
-    AGENTBOX_INTERNAL_COMMAND: Buffer.from(JSON.stringify(command)).toString(
-      "base64url",
-    ),
-  };
-  delete environment.npm_config_https_proxy;
-  delete environment.npm_config_http_proxy;
-  environment.npm_config_proxy = "http://explicit.example:8080";
-
-  const result = spawnSync(process.execPath, ["dist/child-runner.js"], {
-    encoding: "utf8",
-    env: environment,
-  });
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    https: "http://localhost:41001",
-    http: "http://localhost:41002",
-    proxy: "http://explicit.example:8080",
-  });
-});
-
-test("the sandbox-side runner performs marked Bazel cleanup", () => {
-  const directory = mkdtempSync(join(tmpdir(), "agentbox-bazel-cleanup-test-"));
-  try {
-    const marker = join(directory, "used");
-    const resultPath = join(directory, "cleanup-result");
-    writeFileSync(marker, "");
-    const command = [process.execPath, "-e", "process.exit(7)"];
-    const cleanup = {
-      command: [
-        process.execPath,
-        "-e",
-        'require("node:fs").writeFileSync(process.argv[1], "done")',
-        resultPath,
-      ],
-      marker,
-    };
-    const result = spawnSync(process.execPath, ["dist/child-runner.js"], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        AGENTBOX_INTERNAL_COMMAND: Buffer.from(
-          JSON.stringify(command),
-        ).toString("base64url"),
-        AGENTBOX_INTERNAL_BAZEL_CLEANUP: Buffer.from(
-          JSON.stringify(cleanup),
-        ).toString("base64url"),
-      },
-    });
-
-    assert.equal(result.status, 7, result.stderr);
-    assert.equal(readFileSync(resultPath, "utf8"), "done");
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("config accepts filesystem grants and rejects unknown keys", () => {
-  const directory = mkdtempSync(join(tmpdir(), "agentbox-test-"));
-  try {
-    const valid = join(directory, "valid.toml");
-    writeFileSync(
-      valid,
-      '[filesystem]\nread_only = ["../docs"]\nread_write = ["../repo"]\n\n[env]\nSERVICE_ORG = "example"\n',
-    );
-    const config = new AgentboxConfig(valid, true);
-    assert.equal(config.env.SERVICE_ORG, "example");
-    assert.deepEqual(config.filesystem.readOnly, ["../docs"]);
-    assert.deepEqual(config.filesystem.readWrite, ["../repo"]);
-
-    const invalid = join(directory, "invalid.toml");
-    writeFileSync(invalid, 'aws_proflie = "typo"\n');
-    assert.throws(() => new AgentboxConfig(invalid, true), AgentboxError);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-});
-
-test("filesystem grants extend the policy and preserve protected files", () => {
-  const directory = mkdtempSync(join(tmpdir(), "agentbox-test-"));
-  try {
-    const workspace = join(directory, "workspace");
-    const readOnly = join(directory, "reference");
-    const readWrite = join(directory, "sibling");
-    const configPath = join(readWrite, "agentbox.toml");
-    mkdirSync(workspace);
-    mkdirSync(readOnly);
-    mkdirSync(readWrite);
-
-    const policy = loadPolicy(undefined, workspace, {
-      filesystem: {
-        readOnly: ["../reference", readWrite],
-        readWrite: ["../sibling"],
-      },
-      protectedWritePaths: [configPath],
-    });
-
-    assert.deepEqual(policy.filesystemGrants, {
-      readOnly: [readOnly],
-      readWrite: [readWrite],
-    });
-    assert.ok(policy.config.filesystem.allowRead.includes(readOnly));
-    assert.ok(policy.config.filesystem.allowRead.includes(readWrite));
-    assert.ok(!policy.config.filesystem.allowWrite.includes(readOnly));
-    assert.ok(policy.config.filesystem.allowWrite.includes(readWrite));
-    assert.ok(policy.config.filesystem.denyWrite.includes(configPath));
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
+test("policy symlinks and hard links cannot bypass protection through aliases", (t) => {
+  const { directory, workspace } = fixture(t);
+  const config = join(directory, "trusted.toml");
+  writeFileSync(config, "");
+  const alias = join(workspace, "config.toml");
+  symlinkSync(config, alias);
+  assert.throws(
+    () => loadPolicy(undefined, workspace, { protectedWritePaths: [alias] }),
+    /would freeze the checkout/,
+  );
+  linkSync(config, join(workspace, "hard-link.toml"));
+  assert.throws(
+    () => loadPolicy(undefined, workspace, { protectedWritePaths: [config] }),
+    /hard-link aliases/,
+  );
 });

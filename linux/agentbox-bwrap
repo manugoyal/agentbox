@@ -1,0 +1,3 @@
+#!/bin/sh
+# AppArmor attachment point for the optional Docker namespace setup.
+exec /usr/bin/bwrap "$@"

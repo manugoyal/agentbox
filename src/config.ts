@@ -15,11 +15,18 @@ import { z, ZodError } from "zod";
 
 import { fail } from "./errors.js";
 import { expandHome } from "./system.js";
+import {
+  filesystemSchema,
+  limitsSchema,
+  networkSchema,
+  type NetworkMode,
+  type ResourceLimits,
+} from "./policy.js";
 
 const CONFIG_ENV_VARS = {
   aws_profile: "AGENTBOX_AWS_PROFILE",
   aws_region: "AGENTBOX_AWS_REGION",
-  srt_settings: "AGENTBOX_SRT_SETTINGS",
+  settings: "AGENTBOX_SETTINGS",
 } as const;
 
 export type ConfigKey = keyof typeof CONFIG_ENV_VARS;
@@ -30,25 +37,35 @@ export const DEFAULT_CONFIG_PATH = resolve(
   ),
 );
 
-export const PROMPTED_SECRETS = [
-  "GH_TOKEN",
-  "BRAINTRUST_API_KEY",
-  "DATADOG_SERVICE_ACCESS_TOKEN",
-] as const;
-
 export const EXAMPLE_CONFIG = `# agentbox defaults. Every key is optional, but a file that exists is
 # authoritative: agentbox will not prompt for anything it leaves out.
 
 # AWS profile to exchange for temporary credentials on the host. Use a
 # read-only profile: it, not the sandbox, bounds what AWS calls can do.
-aws_profile = "development-readonly"
+# aws_profile = "development-readonly"
 
 # Region for those credentials.
-aws_region = "us-east-1"
+# aws_region = "us-east-1"
 
-# An srt policy file to use instead of the policy embedded in agentbox. Start
+# An agentbox JSON policy to use instead of the embedded defaults. Start
 # one from \`agentbox --print-settings\`.
-# srt_settings = "~/.srt.json"
+# settings = "~/.config/agentbox-settings.json"
+
+# Network is private by default. "host" shares the workstation's network,
+# including localhost, LAN services and abstract Unix sockets.
+# network = "host"
+
+# Optional private Docker daemon. Its persistent data directory must exist.
+# Without docker_data, images and volumes disappear when the jail exits.
+# docker = true
+# docker_data = "~/.cache/agentbox/docker"
+
+# Optional limits for the whole process tree (requires a systemd user manager).
+# CPU is a percentage: 100 is one CPU, 400 is four CPUs.
+[limits]
+# memory = "8G"
+# tasks = 512
+# cpu = 400
 
 # Additional directories the sandbox may access. Relative paths are resolved
 # from the directory where agentbox is launched. A read_write grant also grants
@@ -61,9 +78,7 @@ aws_region = "us-east-1"
 # or $VAR naming a variable that holds one. The latter keeps references in your
 # shell profile and secret values in 1Password.
 [secrets]
-GH_TOKEN = "$GH_TOKEN_REFERENCE"
-BRAINTRUST_API_KEY = "$BRAINTRUST_API_KEY_REFERENCE"
-DATADOG_SERVICE_ACCESS_TOKEN = "$DATADOG_SERVICE_ACCESS_TOKEN_REFERENCE"
+# SERVICE_TOKEN = "$SERVICE_TOKEN_REFERENCE"
 
 # Plain environment variables. Do not put secrets here: this file is not
 # encrypted. Plain values are applied before injected credentials.
@@ -78,24 +93,16 @@ const environmentName = z
 
 const environmentTable = z.record(environmentName, z.string()).default({});
 
-const filesystemPath = z
-  .string()
-  .refine((value) => value.trim().length > 0, "path must not be empty");
-
-const filesystemTable = z
-  .object({
-    read_only: z.array(filesystemPath).default([]),
-    read_write: z.array(filesystemPath).default([]),
-  })
-  .strict()
-  .default({});
-
 const configSchema = z
   .object({
     aws_profile: z.string().optional(),
     aws_region: z.string().optional(),
-    srt_settings: z.string().optional(),
-    filesystem: filesystemTable,
+    settings: z.string().optional(),
+    network: networkSchema.optional(),
+    docker: z.boolean().optional(),
+    docker_data: z.string().min(1).optional(),
+    limits: limitsSchema.default({}),
+    filesystem: filesystemSchema.default({}),
     secrets: environmentTable,
     env: environmentTable,
   })
@@ -115,6 +122,10 @@ export class AgentboxConfig {
   readonly path: string;
   readonly secrets: Record<string, string> = {};
   readonly env: Record<string, string> = {};
+  readonly network?: NetworkMode;
+  readonly docker?: boolean;
+  readonly dockerData?: string;
+  readonly limits: ResourceLimits = {};
   readonly filesystem = {
     readOnly: [] as string[],
     readWrite: [] as string[],
@@ -157,6 +168,10 @@ export class AgentboxConfig {
 
     Object.assign(this.secrets, validated.secrets);
     Object.assign(this.env, validated.env);
+    this.network = validated.network;
+    this.docker = validated.docker;
+    this.dockerData = validated.docker_data;
+    this.limits = validated.limits;
     this.filesystem.readOnly.push(...validated.filesystem.read_only);
     this.filesystem.readWrite.push(...validated.filesystem.read_write);
     for (const key of Object.keys(CONFIG_ENV_VARS) as ConfigKey[]) {

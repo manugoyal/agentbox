@@ -1,94 +1,31 @@
 #!/usr/bin/env node
 
-/**
- * Agentbox's host-side orchestration entrypoint.
- *
- * The launcher resolves selected credentials, constructs a fresh child
- * environment, loads the SRT policy, and prepares compatibility layers before
- * entering the sandbox. Only the final command runner executes inside the main
- * sandbox. Keeping credential stores and policy construction on the trusted
- * side of that transition is a core part of the security boundary.
- *
- * The command's argv is transported as data and spawned without a shell. Once
- * launched, the command and all of its descendants are governed by SRT; the
- * launcher only waits for completion and tears down session-owned resources.
- */
+/** Trusted launcher: resolve policy and selected credentials, then enter Linux namespaces. */
 import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { createInterface, type Interface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
-import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
-
-import { prepareBazelCompatibility } from "./bazel.js";
-import { runChild } from "./child-process.js";
 import {
   AgentboxConfig,
   DEFAULT_CONFIG_PATH,
   EXAMPLE_CONFIG,
-  PROMPTED_SECRETS,
 } from "./config.js";
 import { exportAwsCredentials, readSecrets } from "./credentials.js";
 import { AgentboxError, fail } from "./errors.js";
 import {
-  ensureLimaDockerBackend,
-  limaBackendStatus,
-  resetLimaDockerBackend,
-  stopLimaDockerBackend,
-} from "./lima-backend.js";
-import {
   loadPolicy,
   printableEmbeddedPolicy,
+  networkSchema,
   type LoadedPolicy,
+  type NetworkMode,
 } from "./policy.js";
-import { allowUnrestrictedMacOSIpEgress } from "./seatbelt.js";
 import {
-  ensureDirectory,
-  isUsableDirectory,
-  replaceProcessEnvironment,
-} from "./system.js";
+  checkPlatform,
+  launchSandbox,
+  sandboxEnvironment,
+} from "./linux-sandbox.js";
 
 const VERSION = "0.1.0";
-
-const PASSTHROUGH_ENV_VARS = [
-  // Process basics.
-  "HOME",
-  "PATH",
-  "SHELL",
-  "USER",
-  "LOGNAME",
-  "TMPDIR",
-  "PWD",
-  // Terminal.
-  "TERM",
-  "TERMINFO",
-  "TERMINFO_DIRS",
-  "COLORTERM",
-  "TERM_PROGRAM",
-  "TERM_PROGRAM_VERSION",
-  "TMUX",
-  "TMUX_PANE",
-  // Locale.
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-] as const;
-
-const TOOL_CONFIG_DIRS = {
-  DOCKER_CONFIG: join(homedir(), ".cache", "agentbox", "docker"),
-  GH_CONFIG_DIR: join(homedir(), ".cache", "agentbox", "gh"),
-  npm_config_cache: join(homedir(), ".cache", "agentbox", "npm"),
-  // pnpm otherwise checks whether its whole platform-specific home is
-  // writable. Agentbox deliberately exposes only the content-addressed store,
-  // not sibling global executables. Naming the store explicitly avoids pnpm's
-  // project-local fallback while retaining compatibility with node_modules
-  // trees created outside the sandbox.
-  npm_config_store_dir:
-    process.platform === "darwin"
-      ? join(homedir(), "Library", "pnpm", "store")
-      : join(homedir(), ".local", "share", "pnpm", "store"),
-} as const;
 
 type ParsedArguments = {
   config?: string;
@@ -101,27 +38,26 @@ type ParsedArguments = {
   yes: boolean;
   help: boolean;
   version: boolean;
-  dockerAction?: "start" | "status" | "stop" | "reset";
+  network?: NetworkMode;
+  docker?: boolean;
   command: string[];
 };
 
 const HELP = `Usage: agentbox [options] -- <command> [arguments...]
 
-Run an explicitly named command inside Anthropic Sandbox Runtime with only the
-credentials and host environment values selected by agentbox.
+Run a command in a lightweight Linux process jail with selected credentials.
+The checkout is writable; the home, temp directory and network are private.
 
 Options:
   -c, --config PATH       TOML config file (default: ${DEFAULT_CONFIG_PATH})
   -p, --profile NAME      AWS profile to exchange for temporary credentials
   -r, --region REGION     AWS region (default: us-east-1)
   -s, --secret NAME=REF   Inject NAME from an op:// 1Password reference or $VAR
-      --settings PATH     Use an SRT JSON policy instead of the embedded policy
-      --print-settings    Print the embedded SRT policy and exit
+      --settings PATH     Use an agentbox JSON policy instead of the defaults
+      --print-settings    Print the embedded JSON policy and exit
       --print-config      Print a commented TOML config example and exit
-      --docker-start      Start or verify the shared Lima Docker backend
-      --docker-status     Show the shared Docker backend status
-      --docker-stop       Stop the shared Docker backend
-      --docker-reset      Delete the backend, including images and volumes
+      --network MODE      none (default) or host (includes localhost and LAN)
+      --docker            Start a private Docker daemon inside the jail
   -y, --yes               Skip the launch confirmation
   -h, --help              Show this help
   -v, --version           Show the version
@@ -171,18 +107,13 @@ export function parseArguments(argv: readonly string[]): ParsedArguments {
     else if (argument === "-y" || argument === "--yes") parsed.yes = true;
     else if (argument === "--print-settings") parsed.printSettings = true;
     else if (argument === "--print-config") parsed.printConfig = true;
-    else if (argument.startsWith("--docker-")) {
-      const action = argument.slice("--docker-".length);
-      if (
-        !(["start", "status", "stop", "reset"] as const).includes(
-          action as "start" | "status" | "stop" | "reset",
-        )
-      ) {
-        fail(`unknown option ${argument}; put child options after --`);
-      }
-      if (parsed.dockerAction)
-        fail("only one Docker backend action may be specified");
-      parsed.dockerAction = action as ParsedArguments["dockerAction"];
+    else if (argument === "--docker") parsed.docker = true;
+    else if (argument === "--network" || argument.startsWith("--network=")) {
+      const [value, nextIndex] = optionValue(argv, index, argument);
+      const parsedNetwork = networkSchema.safeParse(value);
+      if (!parsedNetwork.success) fail("--network must be none or host");
+      parsed.network = parsedNetwork.data;
+      index = nextIndex;
     } else if (
       argument === "-c" ||
       argument === "--config" ||
@@ -221,45 +152,6 @@ export function parseArguments(argv: readonly string[]): ParsedArguments {
   return parsed;
 }
 
-function buildChildEnvironment(
-  config: AgentboxConfig,
-  credentials: Readonly<Record<string, string>>,
-  secrets: Readonly<Record<string, string>>,
-): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
-  for (const name of PASSTHROUGH_ENV_VARS) {
-    const value = process.env[name];
-    if (value !== undefined) environment[name] = value;
-  }
-  Object.assign(environment, TOOL_CONFIG_DIRS);
-
-  const inheritedTmpdir = environment.TMPDIR;
-  if (!isUsableDirectory(inheritedTmpdir)) {
-    if (inheritedTmpdir) {
-      console.error(
-        `agentbox: TMPDIR=${inheritedTmpdir} is missing or unwritable; ` +
-          "falling back to /tmp",
-      );
-    }
-    environment.TMPDIR = "/tmp";
-  }
-
-  if (!environment.LC_ALL && !environment.LC_CTYPE && !environment.LANG) {
-    environment.LANG = "en_US.UTF-8";
-  }
-
-  // Plain config may adjust safe defaults such as GH_CONFIG_DIR, but selected
-  // credentials come last and cannot be shadowed by a plain config value.
-  Object.assign(environment, config.env, credentials, secrets);
-  return environment;
-}
-
-function prepareRuntimeDirectories(): void {
-  ensureDirectory("/tmp/claude");
-  for (const directory of Object.values(TOOL_CONFIG_DIRS))
-    ensureDirectory(directory);
-}
-
 function printLaunchSummary(options: {
   policy: LoadedPolicy;
   profile: string;
@@ -267,133 +159,38 @@ function printLaunchSummary(options: {
   secrets: Readonly<Record<string, string>>;
   command: readonly string[];
 }): void {
-  console.log();
-  console.log(`  srt settings   ${options.policy.label}`);
-  console.log(
+  console.error();
+  console.error(`  settings       ${options.policy.label}`);
+  console.error(
     `  filesystem ro  ${options.policy.filesystemGrants.readOnly.join(" ") || "(none)"}`,
   );
-  console.log(
+  console.error(
     `  filesystem rw  ${options.policy.filesystemGrants.readWrite.join(" ") || "(none)"}`,
   );
-  console.log(`  aws profile    ${options.profile || "(none)"}`);
-  console.log(`  aws identity   ${options.identity}`);
-  console.log(
+  console.error(`  network        ${options.policy.network}`);
+  console.error(
+    `  docker         ${options.policy.docker ? "private daemon" : "off"}`,
+  );
+  console.error(`  limits         ${JSON.stringify(options.policy.limits)}`);
+  console.error(`  aws profile    ${options.profile || "(none)"}`);
+  console.error(`  aws identity   ${options.identity}`);
+  console.error(
     `  secrets        ${Object.keys(options.secrets).sort().join(" ") || "(none)"}`,
   );
-  console.log(`  command        ${JSON.stringify(options.command)}`);
-  console.log();
+  console.error(`  command        ${JSON.stringify(options.command)}`);
+  console.error();
 }
 
-async function question(readline: Interface, message: string): Promise<string> {
+async function question(
+  readline: Interface | undefined,
+  message: string,
+): Promise<string> {
+  if (!readline) fail("cannot prompt during a noninteractive launch");
   try {
     return (await readline.question(message)).trim();
   } catch {
     return "";
   }
-}
-
-async function launch(
-  command: readonly string[],
-  policy: LoadedPolicy,
-  environment: NodeJS.ProcessEnv,
-): Promise<number> {
-  prepareRuntimeDirectories();
-  let compatibility:
-    Awaited<ReturnType<typeof prepareBazelCompatibility>> | undefined;
-
-  try {
-    const dockerEnvironment = await ensureLimaDockerBackend();
-    if (dockerEnvironment) {
-      // These Docker CLI settings can override or conflict with DOCKER_HOST.
-      // The backend endpoint is the only daemon an agentbox launch may use.
-      delete environment.DOCKER_CONTEXT;
-      delete environment.DOCKER_TLS_VERIFY;
-      delete environment.DOCKER_CERT_PATH;
-      Object.assign(environment, dockerEnvironment);
-    }
-    await SandboxManager.initialize(policy.config);
-    compatibility = prepareBazelCompatibility(environment.PATH ?? "");
-    Object.assign(environment, compatibility.environment);
-    environment.AGENTBOX_INTERNAL_COMMAND = Buffer.from(
-      JSON.stringify(command),
-    ).toString("base64url");
-    if (compatibility.cleanup) {
-      environment.AGENTBOX_INTERNAL_BAZEL_CLEANUP = Buffer.from(
-        JSON.stringify(compatibility.cleanup),
-      ).toString("base64url");
-    }
-    environment.AGENTBOX_INTERNAL_NODE = process.execPath;
-    environment.AGENTBOX_INTERNAL_RUNNER = fileURLToPath(
-      new URL("./child-runner.js", import.meta.url),
-    );
-    // SRT's POSIX wrapper inherits process.env. Replacing it here is the actual
-    // environment boundary: ambient AWS profiles, SSH agent sockets, and future
-    // host credentials never reach the sandbox merely because they were set in
-    // the shell that launched agentbox.
-    replaceProcessEnvironment(environment);
-
-    // SRT's POSIX API currently accepts a command string. Keep that string
-    // constant and carry the user's argv out-of-band; child-runner decodes it
-    // and uses spawn(shell:false), so no user argument is ever shell-parsed.
-    const wrapped = await SandboxManager.wrapWithSandboxArgv(
-      'exec "$AGENTBOX_INTERNAL_NODE" "$AGENTBOX_INTERNAL_RUNNER"',
-      "/bin/bash",
-      undefined,
-      undefined,
-      process.cwd(),
-    );
-    const argv = policy.unrestrictedIpEgress
-      ? allowUnrestrictedMacOSIpEgress(wrapped.argv)
-      : wrapped.argv;
-    const executable = argv[0];
-    if (!executable) fail("srt produced an empty sandbox command");
-
-    return await runChild(executable, argv.slice(1), {
-      cwd: process.cwd(),
-      env: wrapped.env,
-      stdio: "inherit",
-    });
-  } finally {
-    SandboxManager.cleanupAfterCommand();
-    compatibility?.close();
-    await SandboxManager.reset();
-  }
-}
-
-async function runDockerAction(
-  action: NonNullable<ParsedArguments["dockerAction"]>,
-): Promise<number> {
-  if (action === "start") {
-    const environment = await ensureLimaDockerBackend();
-    if (!environment)
-      fail("Lima is not installed; on macOS, run: brew install lima");
-    console.log(`Docker backend ready at ${environment.DOCKER_HOST}`);
-    return 0;
-  }
-  if (action === "status") {
-    const status = await limaBackendStatus();
-    if (!status.installed) {
-      console.log("Docker backend unavailable: Lima is not installed");
-      return 0;
-    }
-    const detail = status.state?.message ? ` (${status.state.message})` : "";
-    console.log(
-      `Docker backend ${status.running ? "running" : (status.state?.status ?? "stopped")}${detail}`,
-    );
-    console.log(`Log: ${status.log}`);
-    return 0;
-  }
-  if (action === "stop") {
-    console.log(
-      (await stopLimaDockerBackend())
-        ? "Docker backend stopped"
-        : "Docker backend is not running",
-    );
-    return 0;
-  }
-  await resetLimaDockerBackend();
-  console.log("Docker backend reset; images, containers, and volumes removed");
-  return 0;
 }
 
 export async function run(argv = process.argv.slice(2)): Promise<number> {
@@ -415,38 +212,40 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
     process.stdout.write(EXAMPLE_CONFIG);
     return 0;
   }
-  if (args.dockerAction) {
-    if (args.command.length > 0)
-      fail(`--docker-${args.dockerAction} cannot be combined with a command`);
-    return runDockerAction(args.dockerAction);
-  }
   if (args.command.length === 0) {
     fail("a command is required; pass it after --");
   }
 
+  checkPlatform();
+  if (process.env.AGENTBOX_SRT_SETTINGS)
+    fail(
+      "AGENTBOX_SRT_SETTINGS is obsolete; migrate to AGENTBOX_SETTINGS and --print-settings",
+    );
+  if (!args.yes && !process.stdin.isTTY)
+    fail("use --yes for a noninteractive launch");
   const config = new AgentboxConfig(
     args.config ?? DEFAULT_CONFIG_PATH,
     args.config !== undefined,
   );
   const region = args.region ?? config.get("aws_region", "us-east-1");
-  const settings = (args.settings ?? config.get("srt_settings")) || undefined;
+  const settings = (args.settings ?? config.get("settings")) || undefined;
   const policy = loadPolicy(settings, process.cwd(), {
     filesystem: config.filesystem,
+    network: args.network ?? config.network,
+    docker: args.docker ?? config.docker,
+    dockerData: config.dockerData,
+    limits: config.limits,
     protectedWritePaths: [config.path],
   });
 
-  const readline = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+  const readline = args.yes
+    ? undefined
+    : createInterface({
+        input: process.stdin,
+        output: process.stderr,
+      });
   try {
-    let profile = args.profile ?? config.get("aws_profile");
-    if (!profile && !config.exists) {
-      profile = await question(
-        readline,
-        "AWS profile (empty for no AWS access): ",
-      );
-    }
+    const profile = args.profile ?? config.get("aws_profile");
 
     const secretSpecifications = [...args.secrets];
     const namedSecrets = new Set(
@@ -458,16 +257,6 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
       if (!namedSecrets.has(name))
         secretSpecifications.push(`${name}=${reference}`);
     }
-    if (!config.exists && secretSpecifications.length === 0) {
-      for (const name of PROMPTED_SECRETS) {
-        const reference = await question(
-          readline,
-          `1Password ref for ${name}, op:// or $VAR (empty to skip): `,
-        );
-        if (reference) secretSpecifications.push(`${name}=${reference}`);
-      }
-    }
-
     let awsEnvironment: Record<string, string> = {};
     let identity = "(none)";
     if (profile) {
@@ -477,13 +266,14 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
     }
     const secrets = readSecrets(secretSpecifications);
 
-    printLaunchSummary({
-      policy,
-      profile,
-      identity,
-      secrets,
-      command: args.command,
-    });
+    if (!args.yes)
+      printLaunchSummary({
+        policy,
+        profile,
+        identity,
+        secrets,
+        command: args.command,
+      });
     if (!args.yes) {
       const answer = (await question(readline, "Launch? [y/N] ")).toLowerCase();
       if (answer !== "y" && answer !== "yes") fail("aborted");
@@ -491,11 +281,15 @@ export async function run(argv = process.argv.slice(2)): Promise<number> {
 
     // Close readline before the child takes over the terminal. Leaving it active
     // would compete with full-screen coding-agent TUIs for stdin.
-    readline.close();
-    const environment = buildChildEnvironment(config, awsEnvironment, secrets);
-    return await launch(args.command, policy, environment);
+    readline?.close();
+    const environment = sandboxEnvironment(policy, {
+      ...config.env,
+      ...awsEnvironment,
+      ...secrets,
+    });
+    return await launchSandbox(policy, args.command, environment);
   } finally {
-    readline.close();
+    readline?.close();
   }
 }
 

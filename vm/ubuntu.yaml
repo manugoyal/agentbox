@@ -1,0 +1,74 @@
+# Generic, persistent Ubuntu development workstation for Lima.
+# CPU, RAM, disk size, VM driver, and optional networking are host-side choices.
+# No repositories, credentials, host filesystem mounts, or project build settings.
+minimumLimaVersion: "2.2.0"
+os: Linux
+arch: default
+
+# Official Ubuntu 26.04 LTS images, pinned to the digests in Lima 2.2.0.
+images:
+  - location: https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-arm64.img
+    arch: aarch64
+    digest: sha256:7bcf159e29ad0000bfed9c57875908c39268f5ed1257f4958fa6a9f5f60edd54
+  - location: https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-amd64.img
+    arch: x86_64
+    digest: sha256:117816726abbdefc5ef3e38902e81a76f1c76c3610e709999d0885f9d5d9b477
+# Ubuntu 26.04 NIC rename workaround supplied by Lima's official template.
+param:
+  internal_netplanOptional: "true"
+
+user:
+  home: "/home/{{.User}}"
+  shell: /bin/bash
+mounts: []
+mountInotify: false
+containerd:
+  system: false
+  user: false
+ssh:
+  localPort: 0
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+  forwardX11: false
+  forwardX11Trusted: false
+# SSH still works. Other services require explicit tunnels or guest IP access.
+portForwards:
+  - guestIP: "0.0.0.0"
+    proto: any
+    ignore: true
+propagateProxyEnv: false
+hostResolver:
+  enabled: true
+plain: false
+nestedVirtualization: false
+video:
+  display: none
+audio:
+  device: none
+
+# Update once during setup, not automatically on every workstation restart.
+upgradePackages: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      if [ ! -e /var/lib/dev-workstation/provision-v1.done ]; then
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=a
+        apt-get -o Acquire::Retries=3 update
+        apt-get -o Acquire::Retries=3 --with-new-pkgs upgrade -y
+        apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+          build-essential ca-certificates curl git openssh-client \
+          pkg-config cmake ninja-build python3 python3-venv \
+          ripgrep fd-find jq unzip zip rsync tmux htop vim-tiny \
+          bubblewrap socat uidmap acl time fio sysbench
+        install -d -m 0755 /var/lib/dev-workstation
+        touch /var/lib/dev-workstation/provision-v1.done
+      fi
+      systemctl enable --now fstrim.timer
+  - mode: user
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      install -d -m 0755 "{{.Home}}/src"

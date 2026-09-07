@@ -1,10 +1,4 @@
-import {
-  accessSync,
-  constants,
-  existsSync,
-  mkdirSync,
-  statSync,
-} from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -70,32 +64,4 @@ export function runChecked(
     );
   }
   return result.stdout;
-}
-
-export function ensureDirectory(path: string): void {
-  try {
-    mkdirSync(path, { recursive: true });
-  } catch (error) {
-    console.error(`agentbox: could not create ${path}: ${String(error)}`);
-  }
-}
-
-export function isUsableDirectory(path: string | undefined): path is string {
-  if (!path || !existsSync(path)) return false;
-  try {
-    return (
-      statSync(path).isDirectory() &&
-      accessSync(path, constants.W_OK) === undefined
-    );
-  } catch {
-    return false;
-  }
-}
-
-/** Replace the process environment with the exact child allowlist. */
-export function replaceProcessEnvironment(
-  environment: NodeJS.ProcessEnv,
-): void {
-  for (const name of Object.keys(process.env)) delete process.env[name];
-  Object.assign(process.env, environment);
 }

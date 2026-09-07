@@ -1,285 +1,327 @@
 /**
- * The default SRT policy and the loader for user-supplied replacements.
- *
- * The embedded policy treats the current checkout and selected tool/cache
- * directories as the writable development area while denying the rest of the
- * user's home directory. Outbound IP networking is intentionally unrestricted,
- * but Unix sockets and macOS Mach services remain narrow host-service
- * boundaries. The runtime and launcher settings are protected so a sandboxed
- * command cannot silently weaken a later launch.
- *
- * A custom settings file replaces the embedded policy rather than extending
- * it. Callers should therefore treat custom settings as a complete security
- * policy and review them independently.
+ * Resolve a Linux process jail from an allowlist, starting with an empty root.
+ * Only the checkout, selected toolchains, and explicit grants are mounted.
+ * Paths are canonicalized before checking overlaps: aliases must not turn a
+ * read-only grant or launcher policy into writable data.
  */
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import {
-  SandboxRuntimeConfigSchema,
-  type SandboxRuntimeConfig,
-} from "@anthropic-ai/sandbox-runtime";
+import { z } from "zod";
 
 import { fail } from "./errors.js";
-import { expandHome, findExecutable, runChecked } from "./system.js";
+import { expandHome } from "./system.js";
 
-// Reads are deny-then-allow and writes are allow-only. Relative paths resolve
-// against the launch directory, keeping the policy project-neutral.
-export const EMBEDDED_POLICY = {
-  filesystem: {
-    denyRead: [
-      "~",
-      // Cargo keeps registry tokens alongside otherwise useful tool state.
-      "~/.cargo/credentials",
-      "~/.cargo/credentials.toml",
-    ],
-    allowRead: [
-      ".",
-      "~/.cargo",
-      "~/.claude",
-      "~/.claude.json",
-      "~/.codex",
-      "~/.local",
-      "~/.rustup",
-      "~/.cache",
-      "~/Library/Caches",
-      // Reuse pnpm's content-addressed stores without exposing sibling global
-      // executables for writes.
-      "~/Library/pnpm/store",
-      "~/.local/share/pnpm/store",
-      // npm and pnpm use this for registry and store configuration. It is
-      // intentionally read-only; agents should not be able to persist changes
-      // to the user's package-manager defaults.
-      "~/.npmrc",
-      "~/.gitconfig",
-      "~/.config/git/ignore",
-      "~/.zshenv",
-      "~/.zprofile",
-      "~/.zshrc",
-      "~/.config/mise",
-    ],
-    allowWrite: [
-      // Full-screen terminal programs need the terminal devices and ioctls.
-      "/dev/stdout",
-      "/dev/stderr",
-      "/dev/null",
-      "/dev/tty",
-      "/dev/dtracehelper",
-      "/dev/autofs_nowait",
-      ".",
-      // Registry downloads and unpacked crate sources are shared with Cargo
-      // outside the sandbox. Keep Cargo config, credentials, and bin read-only.
-      "~/.cargo/registry",
-      "~/.claude",
-      "~/.claude.json",
-      "~/.codex",
-      "~/.cache",
-      "~/Library/Caches",
-      "~/Library/pnpm/store",
-      "~/.local/share/pnpm/store",
-      "/tmp",
-      "/private/tmp",
-      "/private/var/folders",
-    ],
-    // These files sit inside writable directories. denyWrite takes precedence
-    // and prevents a sandboxed agent from widening its next launch policy.
-    denyWrite: [
-      "~/.claude/settings.json",
-      "~/.codex/config.toml",
-      "~/.codex/hooks.json",
-      "./.claude/settings.json",
-      "./.claude/settings.local.json",
-      "./.codex/config.toml",
-      "./.codex/hooks.json",
-    ],
-  },
-  network: {
-    // Keep SRT's restricted-network profile so Unix-domain sockets remain
-    // path-scoped below. Agentbox separately adds direct outbound IP access on
-    // macOS for build tools that clear proxy variables. The wildcard keeps
-    // proxy-aware tools unrestricted too.
-    allowedDomains: ["*"],
-    deniedDomains: [],
-    // No permission callback is installed. Make the wildcard deterministic.
-    strictAllowlist: true,
-    allowLocalBinding: true,
-    // Go asks trustd to verify certificates. Without this Mach lookup, gh and
-    // Terraform report misleading TLS or authentication failures on macOS.
-    allowMachLookup: [
-      "com.apple.trustd.agent",
-      // Directory fs.watch on macOS is implemented through FSEvents. Without
-      // this lookup libuv reports the service denial as the misleading EMFILE
-      // (too many open files). Seatbelt still applies the filesystem policy to
-      // the paths a process asks FSEvents to observe.
-      "com.apple.FSEvents",
-    ],
-    // Some development tools use Unix sockets for private, same-process-tree
-    // IPC. In particular, tsx creates a temporary socket beneath TMPDIR, which
-    // SRT sets to /tmp/claude. Limit that permission to SRT's dedicated temp
-    // subtree: allowing all of /tmp could expose unrelated host services (for
-    // example an SSH agent), while allowing every Unix socket could expose the
-    // raw host Docker daemon and bypass agentbox's Lima VM boundary.
-    //
-    // SRT can enforce this path allowlist on macOS. On Linux its seccomp filter
-    // cannot inspect socket paths, so allowUnixSockets is intentionally ignored
-    // and Unix sockets remain blocked unless allowAllUnixSockets is enabled.
-    // Direct IP egress resolves names through macOS's fixed DNS socket. This
-    // exposes only the system resolver, not arbitrary host service sockets.
-    allowUnixSockets: ["/tmp/claude", "/private/var/run/mDNSResponder"],
-    allowAllUnixSockets: false,
-  },
-  ignoreViolations: {},
-  allowPty: true,
-  enableWeakerNestedSandbox: true,
-} satisfies SandboxRuntimeConfig;
+export const filesystemSchema = z
+  .object({
+    read_only: z.array(z.string().min(1)).default([]),
+    read_write: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
 
+export const limitsSchema = z
+  .object({
+    // systemd accepts byte counts and binary K/M/G/T suffixes.
+    memory: z
+      .string()
+      .regex(/^[1-9][0-9]*[KMGT]?$/)
+      .optional(),
+    tasks: z.number().int().positive().max(1_000_000).optional(),
+    cpu: z.number().positive().max(100_000).optional(),
+  })
+  .strict();
+
+export const networkSchema = z.enum(["none", "host"]);
+export const settingsSchema = z
+  .object({
+    filesystem: filesystemSchema.default({}),
+    network: networkSchema.default("none"),
+    docker: z.boolean().default(false),
+    docker_data: z.string().min(1).optional(),
+    limits: limitsSchema.default({}),
+  })
+  .strict();
+
+export type ResourceLimits = z.infer<typeof limitsSchema>;
+export type NetworkMode = z.infer<typeof networkSchema>;
+export type Mount = { path: string; writable: boolean };
 export type LoadedPolicy = {
-  config: SandboxRuntimeConfig;
   label: string;
-  filesystemGrants: {
-    readOnly: string[];
-    readWrite: string[];
-  };
-  unrestrictedIpEgress: boolean;
+  cwd: string;
+  home: string;
+  network: NetworkMode;
+  docker: boolean;
+  dockerData?: string;
+  limits: ResourceLimits;
+  mounts: Mount[];
+  protectedPaths: string[];
+  filesystemGrants: { readOnly: string[]; readWrite: string[] };
 };
 
-export type PolicyAdditions = {
-  filesystem?: {
-    readOnly?: readonly string[];
-    readWrite?: readonly string[];
-  };
-  protectedWritePaths?: readonly string[];
-};
+export const EMBEDDED_POLICY = settingsSchema.parse({});
 
-function cloneEmbeddedPolicy(): SandboxRuntimeConfig {
-  return structuredClone(EMBEDDED_POLICY);
+export function isWithin(path: string, parent: string): boolean {
+  return (
+    path === parent || path.startsWith(parent === "/" ? "/" : `${parent}/`)
+  );
+}
+
+// Resolve even an absent policy file through its existing ancestors. This also
+// catches a config reached through a symlink inside a writable checkout.
+export function canonicalPath(path: string): string {
+  if (existsSync(path)) return realpathSync(path);
+  const parent = dirname(path);
+  if (parent === path) return path;
+  return join(canonicalPath(parent), path.slice(parent.length));
+}
+
+function grantPath(path: string, cwd: string): string {
+  const absolute = resolve(cwd, expandHome(path));
+  let canonical: string;
+  try {
+    canonical = realpathSync(absolute);
+    const stat = statSync(canonical);
+    if (!stat.isFile() && !stat.isDirectory()) {
+      fail(
+        `filesystem grants must name regular files or directories: ${absolute}`,
+      );
+    }
+  } catch (error) {
+    fail(`cannot grant ${absolute}: ${String(error)}`);
+  }
+  // Never expose namespace handles, devices or the user's service manager.
+  for (const reserved of ["/proc", "/sys", "/dev", "/run"]) {
+    if (isWithin(canonical, reserved) || isWithin(reserved, canonical)) {
+      fail(`cannot grant namespace or service path ${canonical}`);
+    }
+  }
+  if (["/tmp", "/var/tmp"].includes(canonical))
+    fail(`grant a specific subdirectory, not ${canonical}`);
+  return canonical;
 }
 
 function gitCommonDirectory(cwd: string): string | undefined {
-  if (!findExecutable("git")) return undefined;
-
-  try {
-    const rawPath = runChecked(
-      ["git", "-C", cwd, "rev-parse", "--git-common-dir"],
-      {
-        GIT_DIR: null,
-        GIT_COMMON_DIR: null,
-        GIT_WORK_TREE: null,
+  const result = spawnSync(
+    "git",
+    ["-C", cwd, "rev-parse", "--git-common-dir"],
+    {
+      encoding: "utf8",
+      timeout: 5000,
+      env: {
+        PATH: process.env.PATH,
+        HOME: homedir(),
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
       },
-    ).trim();
-    return resolve(cwd, rawPath);
-  } catch {
-    return undefined;
-  }
+      stdio: ["ignore", "pipe", "ignore"],
+    },
+  );
+  if (result.status !== 0) return undefined;
+  return grantPath(result.stdout.trim(), cwd);
 }
 
-function resolveConfiguredPath(path: string, cwd: string): string {
-  return resolve(cwd, expandHome(path));
-}
-
-function appendUnique(paths: string[], additions: readonly string[]): void {
-  const known = new Set(paths);
-  for (const path of additions) {
-    if (known.has(path)) continue;
-    paths.push(path);
-    known.add(path);
-  }
-}
-
-/**
- * Load and finish the policy used for this session.
- *
- * The installed JavaScript directory is denied for writes because it contains
- * the policy and launcher implementation. This is the npm-package equivalent
- * of the Python version denying writes to its own single-file executable.
- */
 export function loadPolicy(
   settingsPath: string | undefined,
   cwd: string,
-  additions: PolicyAdditions = {},
+  additions: {
+    filesystem?: {
+      readOnly?: readonly string[];
+      readWrite?: readonly string[];
+    };
+    protectedWritePaths?: readonly string[];
+    network?: NetworkMode;
+    docker?: boolean;
+    dockerData?: string;
+    limits?: ResourceLimits;
+  } = {},
 ): LoadedPolicy {
-  let config: SandboxRuntimeConfig;
-  let label: string;
-
+  cwd = realpathSync(cwd);
+  const home = realpathSync(homedir());
+  if (
+    isWithin(home, cwd) ||
+    ["/usr", "/etc", "/var", "/opt", "/tmp"].includes(cwd)
+  ) {
+    fail("launch from a checkout directory, not a home or system directory");
+  }
+  let config = structuredClone(EMBEDDED_POLICY);
+  let label = "(embedded)";
+  const protectedInputs = [...(additions.protectedWritePaths ?? [])].map(
+    (path) => resolve(cwd, expandHome(path)),
+  );
   if (settingsPath) {
-    const path = resolveConfiguredPath(settingsPath, cwd);
-    let raw: string;
+    label = resolve(cwd, expandHome(settingsPath));
     try {
-      raw = readFileSync(path, "utf8");
+      config = settingsSchema.parse(JSON.parse(readFileSync(label, "utf8")));
     } catch (error) {
-      fail(`could not read srt settings at ${path}: ${String(error)}`);
+      fail(
+        `invalid agentbox settings at ${label}: ${String(error)}. Legacy SRT policies must be migrated; see --print-settings.`,
+      );
     }
-
-    try {
-      config = SandboxRuntimeConfigSchema.parse(JSON.parse(raw));
-    } catch (error) {
-      fail(`invalid srt settings at ${path}: ${String(error)}`);
-    }
-    label = path;
-    config.filesystem.denyWrite.push(path);
-  } else {
-    config = cloneEmbeddedPolicy();
-    label = "(embedded)";
-
-    const commonDirectory = gitCommonDirectory(cwd);
-    if (commonDirectory) {
-      config.filesystem.allowRead ??= [];
-      config.filesystem.allowRead.push(commonDirectory);
-      config.filesystem.allowWrite.push(commonDirectory);
-    }
+    protectedInputs.push(label);
   }
 
   const readWrite = [
     ...new Set(
-      (additions.filesystem?.readWrite ?? []).map((path) =>
-        resolveConfiguredPath(path, cwd),
-      ),
+      [
+        cwd,
+        ...config.filesystem.read_write,
+        ...(additions.filesystem?.readWrite ?? []),
+      ].map((path) => grantPath(path, cwd)),
     ),
   ];
-  const readWriteSet = new Set(readWrite);
+  const docker = additions.docker ?? config.docker;
+  const rawDockerData = docker
+    ? (additions.dockerData ?? config.docker_data)
+    : undefined;
+  const dockerData = rawDockerData ? grantPath(rawDockerData, cwd) : undefined;
+  if (dockerData) {
+    if (!statSync(dockerData).isDirectory())
+      fail("docker_data must be an existing directory");
+    if (!readWrite.includes(dockerData)) readWrite.push(dockerData);
+  }
+  const common = gitCommonDirectory(cwd);
+  if (common && !readWrite.some((path) => isWithin(common, path)))
+    readWrite.push(common);
   const readOnly = [
     ...new Set(
-      (additions.filesystem?.readOnly ?? []).map((path) =>
-        resolveConfiguredPath(path, cwd),
-      ),
+      [
+        ...config.filesystem.read_only,
+        ...(additions.filesystem?.readOnly ?? []),
+      ].map((path) => grantPath(path, cwd)),
     ),
-  ].filter((path) => !readWriteSet.has(path));
+  ];
+  for (const writable of readWrite) {
+    if (isWithin(home, writable))
+      fail(`cannot expose the whole home directory: ${writable}`);
+    for (const system of [
+      "/usr",
+      "/etc",
+      "/bin",
+      "/sbin",
+      "/lib",
+      "/lib64",
+      "/opt",
+    ]) {
+      if (isWithin(writable, system))
+        fail(`system toolchains must be read-only: ${writable}`);
+    }
+    if (readOnly.some((path) => isWithin(writable, path))) {
+      fail(`read-write grant conflicts with a read-only grant: ${writable}`);
+    }
+  }
 
-  config.filesystem.allowRead ??= [];
-  appendUnique(config.filesystem.allowRead, [...readOnly, ...readWrite]);
-  appendUnique(config.filesystem.allowWrite, readWrite);
-
-  const protectedWritePaths = (additions.protectedWritePaths ?? []).map(
-    (path) => resolveConfiguredPath(path, cwd),
+  // Include the Node installation running this launcher (e.g. a versioned mise
+  // installation). No other user tool/config/cache directory is auto-granted.
+  const node = realpathSync(process.execPath);
+  const nodeRoot = dirname(node).endsWith("/bin")
+    ? dirname(dirname(node))
+    : node;
+  const mounts: Mount[] = [
+    ...readWrite.map((path) => ({ path, writable: true })),
+    ...readOnly.map((path) => ({ path, writable: false })),
+  ];
+  if (
+    !isWithin(node, "/usr") &&
+    !mounts.some(({ path, writable }) => !writable && isWithin(nodeRoot, path))
+  ) {
+    mounts.push({ path: nodeRoot, writable: false });
+  }
+  // Parent mounts first; explicit read-only children override writable parents.
+  mounts.sort(
+    (a, b) =>
+      a.path.split("/").length - b.path.split("/").length ||
+      a.path.localeCompare(b.path),
   );
-  appendUnique(config.filesystem.denyWrite, protectedWritePaths);
 
-  // Keep custom network policy deterministic. Agentbox never installs SRT's
-  // "ask" callback, so unmatched hosts are denied when a custom allowlist is
-  // supplied.
-  config.network.strictAllowlist = true;
+  const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+  const protectedPaths = protectedInputs.map(canonicalPath);
+  // Binding a symlink target does not stop replacing the symlink itself.
+  // Freeze a writable directory containing a launcher-policy symlink too.
+  for (const input of protectedInputs) {
+    for (let path = input; dirname(path) !== path; path = dirname(path)) {
+      if (!existsSync(path) || !lstatSync(path).isSymbolicLink()) continue;
+      const parent = canonicalPath(dirname(path));
+      if (readWrite.some((root) => isWithin(parent, root)))
+        protectedPaths.push(parent);
+    }
+  }
+  if (docker) {
+    // The optional Docker supervisor executes inside the jail. Its code is a
+    // read-only mount, including when agentbox is run from its own checkout.
+    mounts.push({ path: join(packageRoot, "dist"), writable: false });
+  }
+  for (const entry of [
+    "dist",
+    "bin",
+    "node_modules",
+    "package.json",
+    "package-lock.json",
+  ]) {
+    protectedPaths.push(canonicalPath(join(packageRoot, entry)));
+  }
+  const protections = new Set<string>();
+  for (let path of protectedPaths) {
+    if (existsSync(path) && statSync(path).isFile() && statSync(path).nlink > 1)
+      fail(`protected launcher file has hard-link aliases: ${path}`);
+    if (!mounts.some((mount) => mount.writable && isWithin(path, mount.path)))
+      continue;
+    // An absent file cannot be bind-mounted without creating a host file. Freeze
+    // its nearest existing ancestor instead, or reject an unusable workspace.
+    while (!existsSync(path)) path = dirname(path);
+    if (path === cwd)
+      fail(
+        "launcher configuration would freeze the checkout; use an existing, non-symlinked config outside it",
+      );
+    protections.add(path);
+  }
 
-  // A wildcard with no denies is the explicit opt-in to direct IP egress.
-  // Custom SRT settings can retain domain filtering by supplying a narrower
-  // allowlist or any deny rule.
-  const unrestrictedIpEgress =
-    config.network.allowedDomains.includes("*") &&
-    config.network.deniedDomains.length === 0;
-
-  // All runtime modules live together in dist/. Protecting that directory
-  // prevents a child launched from the agentbox source tree from rewriting the
-  // code or embedded policy used on its next launch.
-  const runtimeDirectory = dirname(fileURLToPath(import.meta.url));
-  config.filesystem.allowRead ??= [];
-  appendUnique(config.filesystem.allowRead, [runtimeDirectory]);
-  appendUnique(config.filesystem.denyWrite, [runtimeDirectory]);
+  // A read-only file bind prevents writes/unlink, but not renaming one of its
+  // writable ancestors and installing a replacement at the original pathname.
+  // Anchor every such ancestor with a bind mount as well, without freezing its
+  // unrelated contents. Never create placeholders in the host checkout.
+  for (const protection of [
+    ...protections,
+    ...mounts.filter((mount) => !mount.writable).map((mount) => mount.path),
+  ]) {
+    let parent = dirname(protection);
+    while (
+      mounts.some((mount) => mount.writable && isWithin(parent, mount.path))
+    ) {
+      if (!mounts.some((mount) => mount.path === parent)) {
+        mounts.push({
+          path: parent,
+          writable: !readOnly.some((path) => isWithin(parent, path)),
+        });
+      }
+      parent = dirname(parent);
+    }
+  }
+  mounts.sort(
+    (a, b) =>
+      a.path.split("/").length - b.path.split("/").length ||
+      a.path.localeCompare(b.path),
+  );
 
   return {
-    config,
     label,
+    cwd,
+    home,
+    network: additions.network ?? config.network,
+    docker,
+    dockerData,
+    limits: limitsSchema.parse({ ...config.limits, ...additions.limits }),
+    mounts,
+    protectedPaths: [...protections],
     filesystemGrants: { readOnly, readWrite },
-    unrestrictedIpEgress,
   };
 }
 
