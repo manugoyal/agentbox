@@ -23,6 +23,7 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 
 import { prepareBazelCompatibility } from "./bazel.js";
 import { runChild } from "./child-process.js";
+import { prepareCodexCompatibility } from "./codex.js";
 import {
   AgentboxConfig,
   DEFAULT_CONFIG_PATH,
@@ -314,8 +315,13 @@ async function launch(
     await SandboxManager.initialize(policy.config);
     compatibility = prepareBazelCompatibility(environment.PATH ?? "");
     Object.assign(environment, compatibility.environment);
+    const effectiveCommand = prepareCodexCompatibility(
+      command,
+      compatibility.environment.PATH,
+      environment.DOCKER_HOST,
+    );
     environment.AGENTBOX_INTERNAL_COMMAND = Buffer.from(
-      JSON.stringify(command),
+      JSON.stringify(effectiveCommand),
     ).toString("base64url");
     if (compatibility.cleanup) {
       environment.AGENTBOX_INTERNAL_BAZEL_CLEANUP = Buffer.from(
