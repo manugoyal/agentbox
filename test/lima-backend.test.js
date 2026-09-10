@@ -17,10 +17,31 @@ import test from "node:test";
 
 import {
   allowMacOSVirtualization,
+  ensureLimaDockerBackend,
   LimaDockerRelay,
   limaBackendLayout,
   limaStartCommand,
 } from "../dist/lima-backend.js";
+
+test("missing Lima produces a loud Docker warning", async () => {
+  const originalPath = process.env.PATH;
+  const originalConsoleError = console.error;
+  const messages = [];
+  process.env.PATH = "";
+  console.error = (...arguments_) => messages.push(arguments_.join(" "));
+  try {
+    assert.equal(await ensureLimaDockerBackend(), undefined);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    console.error = originalConsoleError;
+  }
+
+  const warning = messages.join("\n");
+  assert.match(warning, /WARNING: Docker is unavailable/);
+  assert.match(warning, /host Docker socket is intentionally blocked/);
+  assert.match(warning, /brew install lima/);
+});
 
 test("new Lima backends disable host mounts", () => {
   const root = mkdtempSync(join(tmpdir(), "agentbox-lima-test-"));

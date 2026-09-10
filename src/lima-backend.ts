@@ -603,7 +603,18 @@ async function waitForReady(
 export async function ensureLimaDockerBackend(): Promise<
   Record<string, string> | undefined
 > {
-  if (!findExecutable("limactl")) return undefined;
+  if (!findExecutable("limactl")) {
+    console.error(
+      [
+        "",
+        "agentbox: WARNING: Docker is unavailable in this sandbox because Lima is not installed.",
+        "agentbox: The host Docker socket is intentionally blocked. Install Lima and relaunch",
+        "agentbox: to enable isolated Docker (macOS: brew install lima).",
+        "",
+      ].join("\n"),
+    );
+    return undefined;
+  }
   const layout = limaBackendLayout();
   let state = await readyState(layout);
   if (!state) {
