@@ -35,6 +35,7 @@ import { findExecutable } from "./system.js";
 
 export type BazelCompatibility = {
   environment: Record<string, string>;
+  shimDirectory: string | undefined;
   cleanup:
     | {
         command: readonly string[];
@@ -46,6 +47,7 @@ export type BazelCompatibility = {
 
 const NO_BAZEL_COMPATIBILITY: BazelCompatibility = {
   environment: {},
+  shimDirectory: undefined,
   cleanup: undefined,
   close() {},
 };
@@ -91,6 +93,7 @@ export function prepareBazelCompatibility(
 
     return {
       environment: { PATH: `${shimDirectory}${delimiter}${basePath}` },
+      shimDirectory,
       cleanup: {
         command: [shimPath, "shutdown"],
         marker: usedMarker,

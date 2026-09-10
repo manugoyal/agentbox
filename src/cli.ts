@@ -315,13 +315,15 @@ async function launch(
     await SandboxManager.initialize(policy.config);
     compatibility = prepareBazelCompatibility(environment.PATH ?? "");
     Object.assign(environment, compatibility.environment);
-    const effectiveCommand = prepareCodexCompatibility(
+    const codexCompatibility = prepareCodexCompatibility(
       command,
       compatibility.environment.PATH,
       environment.DOCKER_HOST,
+      compatibility.shimDirectory,
     );
+    Object.assign(environment, codexCompatibility.environment);
     environment.AGENTBOX_INTERNAL_COMMAND = Buffer.from(
-      JSON.stringify(effectiveCommand),
+      JSON.stringify(codexCompatibility.command),
     ).toString("base64url");
     if (compatibility.cleanup) {
       environment.AGENTBOX_INTERNAL_BAZEL_CLEANUP = Buffer.from(

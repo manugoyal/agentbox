@@ -13,7 +13,13 @@
  * User arguments retain their original order after these launcher-owned global
  * configuration overrides.
  */
-import { basename } from "node:path";
+import { writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+
+export type CodexCompatibility = {
+  command: readonly string[];
+  environment: Record<string, string>;
+};
 
 function codexConfigString(key: string, value: string): string {
   // JSON string syntax is also valid TOML basic-string syntax and safely keeps
@@ -21,27 +27,56 @@ function codexConfigString(key: string, value: string): string {
   return `${key}=${JSON.stringify(value)}`;
 }
 
+function installZshStartupFiles(directory: string): void {
+  for (const name of [".zshenv", ".zprofile", ".zshrc", ".zlogin"]) {
+    // Codex builds its shell snapshot by starting the user's shell. Preserve
+    // each normal startup file, then restore Agentbox's shim to the front after
+    // tool managers in that file have changed PATH. ZDOTDIR points zsh here;
+    // the explicit HOME path avoids recursively sourcing this wrapper.
+    writeFileSync(
+      join(directory, name),
+      [
+        `if [[ -r "$HOME/${name}" ]]; then`,
+        `  source "$HOME/${name}"`,
+        "fi",
+        `export PATH=${JSON.stringify(directory)}:"$PATH"`,
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+  }
+}
+
 export function prepareCodexCompatibility(
   command: readonly string[],
   agentboxPath: string | undefined,
   dockerHost: string | undefined,
-): readonly string[] {
+  shimDirectory: string | undefined,
+): CodexCompatibility {
   const executable = command[0];
   if (
     !executable ||
     basename(executable) !== "codex" ||
     !agentboxPath ||
-    !dockerHost
+    !dockerHost ||
+    !shimDirectory
   ) {
-    return command;
+    return { command, environment: {} };
   }
 
-  return [
-    executable,
-    "-c",
-    codexConfigString("shell_environment_policy.set.PATH", agentboxPath),
-    "-c",
-    codexConfigString("shell_environment_policy.set.DOCKER_HOST", dockerHost),
-    ...command.slice(1),
-  ];
+  installZshStartupFiles(shimDirectory);
+  return {
+    command: [
+      executable,
+      "-c",
+      codexConfigString("shell_environment_policy.set.PATH", agentboxPath),
+      "-c",
+      codexConfigString("shell_environment_policy.set.DOCKER_HOST", dockerHost),
+      ...command.slice(1),
+    ],
+    // Interactive Codex builds a shell snapshot by sourcing the user's startup
+    // files after applying shell_environment_policy.set. The wrapper startup
+    // files above reassert the shim after mise/asdf/etc. reorder PATH.
+    environment: { ZDOTDIR: shimDirectory },
+  };
 }
