@@ -124,8 +124,10 @@ agentbox -p development-readonly -- aws sts get-caller-identity
 agentbox -s 'GH_TOKEN=$GH_TOKEN_REFERENCE' -- gh repo view
 ```
 
-Agentbox passes the complete command through unchanged. It never supplies a
-default command or adds full-allow flags.
+Agentbox never supplies a default command or adds full-allow flags. It preserves
+the command's arguments, apart from launcher-owned compatibility settings that
+keep Agentbox's isolated Docker endpoint available to Bazel commands run by
+Codex.
 
 Run `agentbox --help` for all options, `agentbox --print-settings` to inspect the
 embedded SRT policy, and `agentbox --print-config` for a commented config
