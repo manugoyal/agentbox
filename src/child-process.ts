@@ -1,10 +1,5 @@
-import {
-  spawn,
-  type ChildProcess,
-  type SpawnOptions,
-} from "node:child_process";
+import { spawn, type SpawnOptions } from "node:child_process";
 import { constants as osConstants } from "node:os";
-import type { Writable } from "node:stream";
 
 function signalExitCode(signal: NodeJS.Signals): number {
   return 128 + (osConstants.signals[signal] ?? 1);
@@ -15,17 +10,9 @@ export function runChild(
   executable: string,
   args: readonly string[],
   options: SpawnOptions,
-  input?: Buffer,
-  setup?: (child: ChildProcess) => Promise<void>,
 ): Promise<number> {
   const child = spawn(executable, args, { ...options, shell: false });
-  if (input) {
-    const pipe = child.stdio[3] as Writable;
-    // Early setup failures can close the pipe before all arguments are read.
-    pipe.on("error", () => {});
-    pipe.end(input);
-  }
-  const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP", "SIGWINCH"] as const;
   const handlers = new Map<NodeJS.Signals, () => void>();
   for (const signal of signals) {
     const handler = () => child.kill(signal);
@@ -45,11 +32,5 @@ export function runChild(
       removeHandlers();
       resolvePromise(signal ? signalExitCode(signal) : (code ?? 1));
     });
-    if (setup)
-      setup(child).catch((error) => {
-        child.kill("SIGKILL");
-        removeHandlers();
-        reject(error);
-      });
   });
 }

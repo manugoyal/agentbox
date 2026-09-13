@@ -1,84 +1,100 @@
-# Linux development workstation
+# VM maintenance
 
-`ubuntu.yaml` is a standalone Lima template, not an agentbox runtime backend.
-It creates a persistent, terminal-only Ubuntu 26.04 LTS workstation. The guest
-has generic development tools, but no repositories, credentials, agents, Docker
-daemon, or project-specific build configuration.
+Agentbox's guest is a persistent Ubuntu development machine. The host CLI
+combines [`ubuntu.yaml`](ubuntu.yaml) with resource and port settings to produce
+a concrete Lima configuration. See the [main README](../README.md) for setup,
+credential sessions, and Git exchange.
 
-## Template versus machine configuration
+## Lifecycle and storage
 
-The shared template describes the guest OS and baseline setup. It deliberately
-does not fix CPU count, RAM, disk size, VM driver, host username, or host paths.
-It supports native ARM64 and x86-64 guests. Choose resources at creation time;
-Lima stores the resolved configuration with each instance. Reusing this
-template does not share disks or other state between instances.
-
-Example for a 16 GiB Apple Silicon Mac running macOS 26 or newer, dedicating
-most resources to development:
+Run these commands on the host:
 
 ```sh
-limactl create --name=dev \
-  --vm-type=vz --network=vzNAT \
-  --cpus=8 --memory=12 --disk=200 \
-  --set '.vmOpts.vz.diskImageFormat = "asif"' \
-  vm/ubuntu.yaml
-limactl start dev
-limactl shell dev
+agentbox vm start
+agentbox vm status
+agentbox vm stop
 ```
 
-On another machine, change the CPU, RAM, and disk arguments. Keep enough RAM
-for the host OS to avoid swapping. ASIF requires macOS 26+; omit the `--set`
-argument on older Macs to use Lima's default raw disk image. VZ and vzNAT are
-Mac-specific choices, not requirements of the template. Other Lima hosts can
-select their supported driver/network instead; those hosts are not yet tested.
+Stopping retains the VM disk, repositories, build caches, Docker images, and
+volumes. Rebooting does not preserve running processes. Push committed work to
+the host and back up the VM separately if uncommitted work matters; the bare
+exchange repository resides on the same guest disk as your checkouts.
 
-## Daily use
+The default Lima home is `~/.local/share/agentbox/lima`, separate from other Lima
+instances and their global configuration. Override it with a top-level
+`lima_home` in the host TOML if necessary. A dedicated directory without global
+`default.yaml`, `override.yaml`, or `base.yaml` files is required because Lima
+merges these settings with instance configuration.
 
-Keep checkouts in `~/src` inside Linux; all source files, caches, and container
-storage should remain on the guest's Linux filesystem. Connect with
-`limactl shell dev`, then use `tmux new-session -A -s work` for a reconnectable
-terminal session. Standard SSH also works with Lima's generated SSH config:
+For direct Lima maintenance, use that directory explicitly:
 
 ```sh
-ssh -F "$HOME/.lima/dev/ssh.config" lima-dev
-# Explicit example tunnel for a server listening on guest localhost:3000:
-ssh -F "$HOME/.lima/dev/ssh.config" -N -L 3000:localhost:3000 lima-dev
+export LIMA_HOME="$HOME/.local/share/agentbox/lima"
+limactl list
+limactl stop agentbox
+limactl edit agentbox
+limactl start agentbox
 ```
 
-The commands above assume Lima's default configuration directory. If you
-customize `LIMA_HOME`, locate the generated config with
-`limactl list --format '{{.SSHConfigFile}}' dev`.
+Replace `agentbox` with your configured VM name. The TOML resource settings are
+creation defaults: edits to them do not resize an existing instance. Use Lima's
+editor while stopped to change the instance's CPU, memory, or forwarding rules,
+subject to the selected driver's capabilities. Keep `mounts: []`,
+`copyToHost: []`, and the other sharing restrictions intact. Agentbox refuses
+credential sessions when the stored configuration violates those restrictions.
+
+An explicit forwarded port uses the following rule before the catch-all ignore
+rule; keep host bindings on loopback:
+
+```yaml
+portForwards:
+  - guestPort: 3000
+    hostPort: 3000
+    guestIP: 127.0.0.1
+    hostIP: 127.0.0.1
+    proto: tcp
+    static: true
+  - guestIP: 0.0.0.0
+    proto: any
+    ignore: true
+```
+
+See Lima's [configuration](https://lima-vm.io/docs/config/),
+[mount](https://lima-vm.io/docs/config/mount/), and
+[port-forwarding](https://lima-vm.io/docs/config/port/) documentation.
+
+## Guest provisioning
+
+The template pins official Ubuntu cloud-image URLs and SHA-256 hashes for
+native ARM64 and x86-64 guests. Initial provisioning updates packages and installs
+ordinary terminal, build, and Docker tools. A marker prevents repeating package
+setup on every start. Keep the guest updated afterward:
 
 ```sh
-limactl autostart enable dev   # Start in the background at Mac login.
-limactl stop dev              # Clean shutdown; disk data persists.
-limactl start dev
+sudo apt update
+sudo apt upgrade
 ```
 
-The initial setup updates Ubuntu packages once. Maintain guest security
-updates afterward and reboot after kernel updates. A Mac reboot does not
-preserve guest processes. Back up uncommitted work as well as pushing Git
-commits; a VM disk is not itself a backup.
+Reboot when required by kernel and system updates. Dated Ubuntu images may
+expire from the download server; update URLs and verified hashes together.
+Package repositories provide current packages, so the installation is not a
+bit-for-bit reproducible environment.
 
-## Boundaries
+The guest account has normal guest sudo privileges and Docker group membership.
+Docker uses the guest's system daemon and persistent `/var/lib/docker`. Container
+bind mounts refer to guest files. Project-specific runtimes and build tools are
+installed using the project's normal instructions.
 
-- No Mac filesystem mounts, forwarded SSH agent, X11, or copied host credentials.
-- Automatic guest-port publication is disabled except Lima's SSH connection.
-- Guest networking remains available, including potential host/LAN reachability.
-  NAT is not a host-access firewall. The host DNS resolver and Lima guest agent
-  remain enabled for network changes and clock synchronization.
-- The Linux developer account retains Lima's default guest-only sudo access.
-  This is a workstation, **not a configured agent jail**. Agentbox policy and
-  any agent-accessible Docker runtime require separate setup inside Linux.
-- The template installs no container daemon and exposes no host Docker socket.
+[`session.py`](session.py) is sent over SSH by the host launcher. It validates a
+small request, stages selected environment values in private guest tmpfs, and
+executes the requested program in the guest home directory. Agentbox itself does
+not need to be installed inside the guest. The host-side CLI and authentication
+tools stay on the host.
 
-## Reproducibility
+## Validation status
 
-The official Ubuntu cloud-image URLs and SHA-256 hashes are pinned. Package
-updates follow Ubuntu's repositories, so provisioning is repeatable but not a
-bit-for-bit reproducible software environment. Ubuntu eventually expires dated
-cloud images; refresh URLs and verified hashes together when necessary.
-
-An existing instance has its own copy of the template. Editing this repository
-does not change an already-created VM. Inspect its configuration under the
-instance's Lima directory, or use `limactl edit dev` while it is stopped.
+Development so far ran inside an existing Ubuntu ARM64 Lima guest. Generated
+YAML passed the real Lima 2.2 validator. Local OpenSSH integration tests exercise
+credential handoff, interactive terminals, and Git transfer. They do not verify
+VM boot, cloud-init provisioning, or host port forwarding. Those checks require
+a session on the host; see [`PLAN.md`](PLAN.md).

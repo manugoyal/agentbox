@@ -1,11 +1,6 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
-import { spawnSync } from "node:child_process";
-
-import { fail } from "./errors.js";
-
-export type EnvironmentOverlay = Record<string, string | null>;
 
 export function expandHome(path: string): string {
   if (path === "~") return homedir();
@@ -31,37 +26,4 @@ export function findExecutable(
     }
   }
   return undefined;
-}
-
-export function overlayEnvironment(
-  base: NodeJS.ProcessEnv,
-  overlay: EnvironmentOverlay,
-): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { ...base };
-  for (const [name, value] of Object.entries(overlay)) {
-    if (value === null) delete result[name];
-    else result[name] = value;
-  }
-  return result;
-}
-
-export function runChecked(
-  argv: readonly string[],
-  overlay?: EnvironmentOverlay,
-): string {
-  const executable = argv[0];
-  if (!executable) fail("internal error: attempted to run an empty command");
-
-  const result = spawnSync(executable, argv.slice(1), {
-    encoding: "utf8",
-    env: overlay ? overlayEnvironment(process.env, overlay) : process.env,
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) {
-    throw new Error(
-      (result.stderr || result.stdout || "command failed").trim(),
-    );
-  }
-  return result.stdout;
 }
