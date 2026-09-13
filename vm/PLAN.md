@@ -38,6 +38,8 @@ created from this implementation on the physical host.
 
 ## Continue on the host
 
+Start with the [host handoff](HANDOFF.md) for installation and session setup.
+
 Preserve the current uncommitted work and the user's index. Do not commit or
 restage without direction. Install the current source on the host, read the main
 README, and use a fresh, dedicated Lima directory so existing unrelated instances
