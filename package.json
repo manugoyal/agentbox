@@ -20,7 +20,7 @@
     "clean": "node scripts/clean.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "install:global": "npm run build && npm install --global --install-links .",
+    "install:global": "npm run build && node scripts/install-global.mjs",
     "prepack": "npm run build",
     "test": "npm run build && node --test test/*.test.js"
   },
