@@ -1,172 +1,88 @@
-/**
- * Strict parsing for Agentbox's small user-facing configuration surface.
- *
- * An existing config is authoritative: omitted credentials are not inferred or
- * prompted for. Rejecting unknown keys and keeping secret references separate
- * from plain environment values makes the launcher's granted capabilities
- * visible and reviewable.
- */
+/** Host-owned configuration. Only run.env and selected credential values enter the VM. */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-
 import { parse } from "smol-toml";
-import { z, ZodError } from "zod";
+import { z } from "zod";
+import { expandHome, fail } from "./system.js";
 
-import { fail } from "./errors.js";
-import { expandHome } from "./system.js";
-
-const CONFIG_ENV_VARS = {
-  aws_profile: "AGENTBOX_AWS_PROFILE",
-  aws_region: "AGENTBOX_AWS_REGION",
-  srt_settings: "AGENTBOX_SRT_SETTINGS",
-} as const;
-
-export type ConfigKey = keyof typeof CONFIG_ENV_VARS;
-
-export const DEFAULT_CONFIG_PATH = resolve(
-  expandHome(
-    process.env.AGENTBOX_CONFIG ?? join(homedir(), ".config", "agentbox.toml"),
-  ),
+export const nameSchema = z.string().regex(/^[a-zA-Z][a-zA-Z0-9_-]{0,62}$/);
+export const environmentSchema = z.record(
+  z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  z.string().refine((value) => !value.includes("\0"), "NUL is not allowed"),
 );
-
-export const PROMPTED_SECRETS = [
-  "GH_TOKEN",
-  "BRAINTRUST_API_KEY",
-  "DATADOG_SERVICE_ACCESS_TOKEN",
-] as const;
-
-export const EXAMPLE_CONFIG = `# agentbox defaults. Every key is optional, but a file that exists is
-# authoritative: agentbox will not prompt for anything it leaves out.
-
-# AWS profile to exchange for temporary credentials on the host. Use a
-# read-only profile: it, not the sandbox, bounds what AWS calls can do.
-aws_profile = "development-readonly"
-
-# Region for those credentials.
-aws_region = "us-east-1"
-
-# An srt policy file to use instead of the policy embedded in agentbox. Start
-# one from \`agentbox --print-settings\`.
-# srt_settings = "~/.srt.json"
-
-# Additional directories the sandbox may access. Relative paths are resolved
-# from the directory where agentbox is launched. A read_write grant also grants
-# read access. Specific write protections still take precedence.
-[filesystem]
-# read_only = ["../shared-docs"]
-# read_write = ["../related-checkout"]
-
-# Environment variables to inject from 1Password. A value may be an op:// path,
-# or $VAR naming a variable that holds one. The latter keeps references in your
-# shell profile and secret values in 1Password.
-[secrets]
-GH_TOKEN = "$GH_TOKEN_REFERENCE"
-BRAINTRUST_API_KEY = "$BRAINTRUST_API_KEY_REFERENCE"
-DATADOG_SERVICE_ACCESS_TOKEN = "$DATADOG_SERVICE_ACCESS_TOKEN_REFERENCE"
-
-# Plain environment variables. Do not put secrets here: this file is not
-# encrypted. Plain values are applied before injected credentials.
-[env]
-# SERVICE_ORG = "example-org"
-# SERVICE_PROJECT = "example-project"
-`;
-
-const environmentName = z
-  .string()
-  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "invalid environment variable name");
-
-const environmentTable = z.record(environmentName, z.string()).default({});
-
-const filesystemPath = z
-  .string()
-  .refine((value) => value.trim().length > 0, "path must not be empty");
-
-const filesystemTable = z
+export const vmSchema = z
   .object({
-    read_only: z.array(filesystemPath).default([]),
-    read_write: z.array(filesystemPath).default([]),
-  })
-  .strict()
-  .default({});
-
-const configSchema = z
-  .object({
-    aws_profile: z.string().optional(),
-    aws_region: z.string().optional(),
-    srt_settings: z.string().optional(),
-    filesystem: filesystemTable,
-    secrets: environmentTable,
-    env: environmentTable,
+    name: nameSchema.default("agentbox"),
+    cpu_percent: z.number().positive().max(100).default(75),
+    memory_percent: z.number().positive().max(100).default(75),
+    disk_gib: z.number().int().min(20).max(100_000).default(200),
+    ports: z.array(z.number().int().min(1).max(65535)).default([]),
   })
   .strict();
+export const configSchema = z
+  .object({
+    lima_home: z
+      .string()
+      .min(1)
+      .default(join(homedir(), ".local/share/agentbox/lima")),
+    vm: vmSchema.default({}),
+    run: z
+      .object({
+        aws_profile: z.string().min(1).optional(),
+        aws_region: z.string().min(1).default("us-east-1"),
+        secrets: environmentSchema.default({}),
+        env: environmentSchema.default({}),
+      })
+      .strict()
+      .default({}),
+  })
+  .strict();
+export type Config = z.infer<typeof configSchema>;
+export type VMConfig = z.infer<typeof vmSchema>;
+export const DEFAULT_CONFIG_PATH = join(
+  homedir(),
+  ".config/agentbox/config.toml",
+);
 
-function describeValidationError(error: ZodError): string {
-  return error.issues
-    .map((issue) => {
-      const path = issue.path.length > 0 ? `${issue.path.join(".")}: ` : "";
-      return `${path}${issue.message}`;
-    })
-    .join("; ");
+export function loadConfig(
+  path = process.env.AGENTBOX_CONFIG ?? DEFAULT_CONFIG_PATH,
+  required = false,
+): Config {
+  let data: unknown = {};
+  try {
+    data = parse(readFileSync(resolve(expandHome(path)), "utf8"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || required)
+      fail(`cannot read config ${path}: ${String(error)}`);
+  }
+  const parsed = configSchema.safeParse(data);
+  if (!parsed.success) fail(`invalid config ${path}: ${parsed.error.message}`);
+  parsed.data.lima_home = resolve(expandHome(parsed.data.lima_home));
+  return parsed.data;
 }
 
-export class AgentboxConfig {
-  readonly exists: boolean;
-  readonly path: string;
-  readonly secrets: Record<string, string> = {};
-  readonly env: Record<string, string> = {};
-  readonly filesystem = {
-    readOnly: [] as string[],
-    readWrite: [] as string[],
-  };
-  readonly #values: Partial<Record<ConfigKey, string>> = {};
+export const EXAMPLE_CONFIG = `# Keep this configuration on the host, outside the VM.
+# agentbox uses its own Lima directory so unrelated Lima defaults cannot add mounts.
+# lima_home = "~/.local/share/agentbox/lima"
 
-  constructor(path: string, required = false) {
-    this.path = resolve(expandHome(path));
+[vm]
+name = "agentbox"
+cpu_percent = 75
+memory_percent = 75
+disk_gib = 200
+ports = [3000, 8000]
 
-    let source: string;
-    try {
-      source = readFileSync(this.path, "utf8");
-      this.exists = true;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" && !required) {
-        this.exists = false;
-        return;
-      }
-      if (code === "ENOENT") fail(`no config file at ${this.path}`);
-      fail(`could not read ${this.path}: ${String(error)}`);
-    }
+[run]
+# This profile must issue temporary credentials with service-side read-only permissions.
+# aws_profile = "agentbox-readonly"
+aws_region = "us-east-1"
 
-    let parsed: unknown;
-    try {
-      parsed = parse(source);
-    } catch (error) {
-      fail(`could not parse ${this.path}: ${String(error)}`);
-    }
+[run.secrets]
+# Stored tokens must already have the required scopes and expiration.
+# GH_TOKEN = "op://Agentbox/GitHub/token"
+# BRAINTRUST_API_KEY = "op://Agentbox/Braintrust/token"
 
-    let validated: z.infer<typeof configSchema>;
-    try {
-      validated = configSchema.parse(parsed);
-    } catch (error) {
-      if (error instanceof ZodError) {
-        fail(`${this.path}: ${describeValidationError(error)}`);
-      }
-      throw error;
-    }
-
-    Object.assign(this.secrets, validated.secrets);
-    Object.assign(this.env, validated.env);
-    this.filesystem.readOnly.push(...validated.filesystem.read_only);
-    this.filesystem.readWrite.push(...validated.filesystem.read_write);
-    for (const key of Object.keys(CONFIG_ENV_VARS) as ConfigKey[]) {
-      const value = validated[key];
-      if (value !== undefined) this.#values[key] = value;
-    }
-  }
-
-  get(key: ConfigKey, fallback = ""): string {
-    const environmentName = CONFIG_ENV_VARS[key];
-    return process.env[environmentName] ?? this.#values[key] ?? fallback;
-  }
-}
+[run.env]
+# BRAINTRUST_APP_URL = "http://localhost:3000"
+`;

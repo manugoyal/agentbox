@@ -1,7 +1,7 @@
 {
   "name": "agentbox",
-  "version": "0.1.0",
-  "description": "Run coding agents with explicit credentials inside Anthropic Sandbox Runtime",
+  "version": "0.2.0",
+  "description": "Persistent Lima development VMs with host-side credential brokering and a Git exchange",
   "type": "module",
   "bin": {
     "agentbox": "bin/agentbox.js"
@@ -9,6 +9,8 @@
   "files": [
     "bin",
     "dist",
+    "vm/ubuntu.yaml",
+    "vm/session.py",
     "LICENSE",
     "README.md"
   ],
@@ -18,7 +20,7 @@
     "clean": "node scripts/clean.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "install:global": "npm run build && npm install --global --install-links .",
+    "install:global": "npm run build && node scripts/install-global.mjs",
     "prepack": "npm run build",
     "test": "npm run build && node --test test/*.test.js"
   },
@@ -27,19 +29,19 @@
   },
   "keywords": [
     "agent",
-    "sandbox",
-    "security",
-    "srt"
+    "vm",
+    "lima",
+    "credentials",
+    "git"
   ],
   "license": "Apache-2.0",
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.71",
     "smol-toml": "^1.3.1",
+    "yaml": "^2.9.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.19.15",
-    "@types/node-forge": "^1.3.14",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3"
   }

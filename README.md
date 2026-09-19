@@ -1,225 +1,286 @@
 # agentbox
 
-`agentbox` gives a coding agent broad authority over one checkout without giving
-it the same authority over the rest of the host. It runs an explicitly named
-command inside [Anthropic Sandbox Runtime
-(SRT)](https://github.com/anthropic-experimental/sandbox-runtime), with a small
-host environment and only the credentials the user selects.
+Agentbox is a small host-side wrapper around a persistent Linux VM managed by
+[Lima](https://lima-vm.io/). It starts the VM, resolves selected credentials on
+the host, and runs your command in the VM over SSH.
 
-The main command runs directly on the host under an OS sandbox, not inside a
-virtual machine. This keeps normal development workflows fast and makes the
-workspace feel native, while placing boundaries around host files, processes,
-credentials, and local services.
+The VM is an ordinary development machine. Its source checkouts, build caches,
+Docker images, and tmux sessions persist until you delete the VM. Agentbox does
+not wrap or configure the development tools you run inside it.
 
-## Security model
+## Install
 
-Agentbox builds the sandbox from several independent layers:
-
-- **Filesystem and processes.** SRT gives the command read/write access to the
-  current checkout, temporary files, and selected development-tool state. The
-  rest of the home directory is denied by default, sensitive launcher settings
-  are protected from modification, and child processes inherit the same OS
-  sandbox. The agent is expected to have complete control of the checkout and
-  the other explicitly writable paths.
-- **Environment and credentials.** Agentbox constructs a new environment from a
-  small allowlist instead of inheriting the launcher's environment wholesale.
-  It resolves 1Password references and exchanges AWS profiles on the host, then
-  injects only the resulting values. The sandbox does not receive access to the
-  1Password session, `~/.aws`, SSH agent sockets, or other ambient credentials.
-  An injected credential is still a capability: its service-side permissions
-  remain the ultimate limit on what the agent can do with it.
-- **Network and host services.** Outbound IP networking, including loopback TCP,
-  is unrestricted so general development tools work without per-project network
-  configuration. Unix-domain sockets and macOS Mach services remain scoped;
-  this prevents ambient access to services such as the host Docker daemon or an
-  SSH agent. Because IP egress is unrestricted, sandboxed code can transmit any
-  workspace data or injected credential it can read.
-- **Docker.** Agentbox never grants access to the host Docker socket. When Lima
-  is available, it exposes an unrestricted Docker daemon inside a separate VM
-  with no host filesystem mounts. The agent may fully control that guest, but
-  that authority does not imply control of the host.
-
-This is a practical containment boundary for developer tooling, not a complete
-confidentiality boundary or a substitute for narrowly scoped credentials. The
-embedded policy is primarily exercised on macOS; custom SRT settings replace
-that policy and must be reviewed independently.
-
-## Prerequisites
-
-Agentbox requires Node.js 20.11 or newer and the command you intend to run. SRT
-is installed automatically as an npm dependency; do not install it separately.
-
-On Linux, SRT also requires `bubblewrap`, `socat`, and `ripgrep`.
-
-The following tools are optional:
-
-- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-  when selecting an AWS profile.
-- [1Password CLI](https://www.1password.dev/cli/get-started) when injecting
-  secrets. `op` must be signed in on the host.
-- [Lima](https://lima-vm.io/) when running tests or development tools that
-  launch Docker containers. On macOS, install it with `brew install lima`.
-
-## Build and install from a checkout
-
-For normal use, build the checkout and expose `agentbox` on your `PATH`:
+Install Node.js 20.11 or newer, Lima 2.2 or newer, Git, OpenSSH, and
+[crane](https://github.com/google/go-containerregistry/tree/main/cmd/crane) on
+the host. Crane is only required when publishing guest Docker images. Then
+install Agentbox from this checkout:
 
 ```sh
-npm install
+npm ci
 npm run install:global
 ```
 
-This does not publish anything. `npm install` installs the pinned runtime and
-development dependencies. `install:global` compiles `src/`, then asks npm to
-pack and install an independent snapshot of the checkout. Later edits and
-builds in the checkout do not affect the installed command. Verify the
-installation with:
+To install into a particular mise-managed Node version instead of the currently
+active version:
 
 ```sh
-agentbox --version
+npm run install:global -- --node 24.18.1
 ```
 
-Run `npm run install:global` again whenever you want to replace the global
-command with a new snapshot. Remove the installation with `npm uninstall
---global agentbox`.
+Agentbox runs on the host, not inside the VM.
 
-### Work directly from the checkout
-
-While developing agentbox, an npm link avoids reinstalling after every change:
+## Configure and start
 
 ```sh
-npm install
-npm run build
-npm link
+mkdir -p ~/.config/agentbox
+agentbox --print-config > ~/.config/agentbox/config.toml
 ```
 
-The global `agentbox` command now points at this checkout. Rebuild after editing
-the TypeScript; the link itself does not need to be recreated:
-
-```sh
-npm run build
-# Or keep the compiler running:
-npm run build -- --watch
-```
-
-Remove the development link with `npm unlink --global agentbox`.
-
-To run without either kind of global installation, build and invoke the entry
-point with Node:
-
-```sh
-npm install
-npm run build
-node dist/cli.js -- bash
-```
-
-## Usage
-
-A command is always required and should follow `--`:
-
-```sh
-agentbox -- bash
-agentbox -y -- claude --dangerously-skip-permissions
-agentbox -p development-readonly -- aws sts get-caller-identity
-agentbox -s 'GH_TOKEN=$GH_TOKEN_REFERENCE' -- gh repo view
-```
-
-Agentbox passes the complete command through unchanged. It never supplies a
-default command or adds full-allow flags.
-
-Run `agentbox --help` for all options, `agentbox --print-settings` to inspect the
-embedded SRT policy, and `agentbox --print-config` for a commented config
-example. The default config path is `~/.config/agentbox.toml`. An existing config
-is authoritative: credentials it omits are neither prompted for nor granted.
-
-To let a sandbox work with directories outside the launch checkout, add explicit
-grants to that config:
+The useful parts of the host-only TOML are:
 
 ```toml
-[filesystem]
-read_only = ["../shared-docs"]
-read_write = ["../related-checkout"]
+[vm]
+ports = [3000]
+
+[run]
+aws_profile = "agentbox-readonly"
+aws_region = "us-east-1"
+
+[run.secrets]
+GH_TOKEN = "op://Agentbox/GitHub/token"
+BRAINTRUST_API_KEY = "op://Agentbox/Braintrust/token"
 ```
 
-Paths may be absolute, start with `~/`, or be relative to the directory where
-Agentbox is launched. `read_write` also grants read access. These entries extend
-either the embedded or a custom SRT policy. Read grants can intentionally reopen
-a directory beneath a broadly denied parent such as the home directory, while
-specific write protections continue to take precedence. In particular, the
-active Agentbox config, custom SRT settings, and Agentbox runtime remain
-protected from writes. The resolved grants appear in the launch summary because
-each one deliberately widens the host filesystem visible to sandboxed code.
-
-### Docker backend
-
-When Lima is installed, agentbox maintains one shared Docker VM. Docker is
-unrestricted inside that VM, while the VM has no host filesystem mounts and its
-host-side Lima processes run in a separate, long-lived SRT sandbox. Containers
-can use external networking, and published ports are reachable on the host.
-Agentbox does not inject credentials into Docker automatically. All agentbox
-invocations share the VM's containers, images, volumes, and build cache, so
-invocations can inspect or disrupt one another. The first start downloads and
-provisions the VM.
-
-Manage the backend with:
+Credential values do not belong in this file. Authenticate the AWS and
+1Password CLIs on the host.
 
 ```sh
-agentbox --docker-start
-agentbox --docker-status
-agentbox --docker-stop
-agentbox --docker-reset  # Deletes containers, images, volumes, and build cache.
+agentbox vm config   # Preview the generated Lima configuration
+agentbox vm start
+agentbox vm status
 ```
 
-Run agentbox on the host rather than from another sandbox. AWS SSO, for example,
-may need to refresh files under `~/.aws/sso/cache` before agentbox exports its
-temporary credentials.
+The defaults give the VM 75% of the host's CPUs and RAM and a 200 GiB virtual
+disk. Resource and port settings are applied when the VM is created. To edit an
+existing VM, stop it and use Agentbox's dedicated Lima home:
 
-### Datadog MCP
-
-To authenticate the managed Datadog MCP server, put a narrowly scoped Service
-Access Token in 1Password and reference it from the agentbox config:
-
-```toml
-[secrets]
-DATADOG_SERVICE_ACCESS_TOKEN = "$DATADOG_SERVICE_ACCESS_TOKEN_REFERENCE"
+```sh
+agentbox vm stop
+LIMA_HOME="$HOME/.local/share/agentbox/lima" limactl edit agentbox
+agentbox vm start
 ```
 
-Then configure the Codex harness to use the environment variable:
+Agentbox validates the stored configuration before launching a session.
 
-```toml
-[mcp_servers.datadog]
-url = "https://mcp.datadoghq.com/v1/mcp"
-bearer_token_env_var = "DATADOG_SERVICE_ACCESS_TOKEN"
+## Work in the VM
+
+```sh
+agentbox -- bash -l
 ```
 
-Use the MCP endpoint for your Datadog site if it is not US1.
+Commands start in the guest home directory:
+
+```sh
+agentbox -- docker ps
+agentbox -- bash -lc 'cd ~/src/project && make test'
+```
+
+The guest has sudo, Docker, Compose, Git, Node, Python, and basic build tools.
+Install project-specific tools normally inside the guest.
+
+Ghostty users should install its terminal definition in the VM once so keys and
+screen editing work correctly:
+
+```sh
+infocmp -x xterm-ghostty | agentbox -- tic -x -
+```
+
+Add `-c PATH` to that Agentbox command when using a non-default configuration.
+
+## Credentials
+
+For each launch, Agentbox:
+
+1. asks the host's `aws` CLI for temporary credentials from the configured
+   profile;
+2. reads configured `op://` references with the host's `op` CLI;
+3. sends only those values to the requested guest process over SSH.
+
+The host's credential files, 1Password session, SSH agent, Docker socket, and
+other ambient credentials are not forwarded. AWS profiles must return temporary
+credentials with a session token and expiration. Permissions are still enforced
+by AWS, GitHub, and the other providers; Agentbox does not make a credential
+read-only.
+
+You can also select credentials on the command line:
+
+```sh
+agentbox run \
+  -p agentbox-readonly \
+  -s 'GH_TOKEN=op://Agentbox/GitHub/token' \
+  -- bash -l
+```
+
+### tmux
+
+A convenient long-lived workflow is:
+
+```sh
+agentbox -- tmux new-session -A -s dev
+```
+
+The tmux server keeps the environment with which it was started. To update its
+environment when you attach again, add the names you use to `~/.tmux.conf`
+inside the VM:
+
+```tmux
+set -ga update-environment " AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION GH_TOKEN BRAINTRUST_API_KEY DATADOG_SERVICE_ACCESS_TOKEN"
+```
+
+Source that file once if tmux is already running:
+
+```sh
+tmux source-file ~/.tmux.conf
+```
+
+After refreshing credentials on the host, run the same
+`agentbox -- tmux new-session -A -s dev` command. New windows and panes inherit
+the refreshed values. Existing shells cannot be changed externally; open a new
+pane or run:
+
+```sh
+eval "$(tmux show-environment -s)"
+```
+
+A program that cached credentials internally may still need to be restarted.
+The tmux server and VM do not.
+
+## Ports
+
+Configured ports are forwarded from host loopback to guest loopback, so a
+service listening on port 3000 in the VM is available at
+`http://localhost:3000` on the host.
+
+Only one host process can own a port. If another service or Lima VM already uses
+3000, free the port and restart Agentbox:
+
+```sh
+lsof -nP -iTCP:3000 -sTCP:LISTEN
+limactl stop dev        # If the old default-home VM owns it
+agentbox vm stop
+agentbox vm start
+```
+
+Agentbox keeps its VM under `~/.local/share/agentbox/lima`. This is separate
+from the instances shown by a normal `limactl list`, which uses Lima's default
+home.
+
+## Publish Docker images
+
+Build and load an image into the guest Docker daemon with its complete registry
+tag. From the host, publish that exact image using the host's registry
+credentials:
+
+```sh
+agentbox docker publish registry.example.com/team/image:tag
+```
+
+Agentbox verifies that the exact tag exists in the guest, exports its image ID
+over SSH to a private temporary host archive, and asks `crane` to push it to the
+same reference. The archive is removed after success or failure. The host
+Docker daemon is not required, and registry credentials, credential helpers,
+and the host Docker socket are not sent into the VM.
+
+Authenticate `crane` on the host before publishing. It uses the host's Docker
+credential configuration and helpers, or credentials configured with
+`crane auth login`.
+
+## Move code with Git
+
+Host directories are not mounted into the VM. Agentbox instead creates an empty
+bare Git repository on the guest disk for returning commits to the host.
+
+Create the exchange from a host checkout:
+
+```sh
+agentbox git init project
+```
+
+In the VM, clone the main repository normally and add the exchange as a second
+remote:
+
+```sh
+gh auth setup-git
+git clone https://github.com/your-org/your-repo.git ~/src/project
+cd ~/src/project
+git remote add exchange ~/.local/share/agentbox/exchange/project.git
+git config remote.pushDefault exchange
+```
+
+`origin` remains the read-only source for fetches and pulls. A plain `git push`
+goes to `exchange`:
+
+```sh
+# In the VM
+git switch -c my-work origin/main
+# Commit changes.
+git push
+```
+
+From the host checkout, publish that branch directly to its normal `origin`:
+
+```sh
+agentbox git publish project my-work
+```
+
+This fetches the exchange branch and pushes it using the host's Git credentials,
+without checking it out or sending write credentials into the VM.
+
+To inspect the branch before publishing it, fetch the exchange manually. Its
+branches appear under `agentbox/EXCHANGE/` without changing the current branch
+or working tree:
+
+```sh
+agentbox git fetch project
+git log --oneline HEAD..agentbox/project/my-work
+git diff HEAD...agentbox/project/my-work
+```
+
+For a branch that does not yet exist locally, create it from the fetched ref and
+then publish it using the host's normal GitHub credentials:
+
+```sh
+git switch -c my-work agentbox/project/my-work
+git push -u origin my-work
+```
+
+If the local branch already exists, fast-forward it to the exchange version:
+
+```sh
+git switch my-work
+git merge --ff-only agentbox/project/my-work
+```
+
+The guest's GitHub token should have read-only repository access. An explicit
+`git push origin` still targets GitHub and should be rejected by GitHub; the
+default push target is the local exchange. Only committed Git objects move
+between the machines. If the host and exchange branches have diverged, inspect
+the commits and reconcile them with the usual merge or rebase workflow.
+
+## Isolation
+
+The VM has no host mounts, SSH-agent forwarding, X11 forwarding, or host Docker
+socket. It does have outbound networking, guest sudo, and its own Docker daemon.
+Anything running in the VM can inspect guest state and retain credentials it
+receives, so use provider-side scopes and separate VMs for separate trust
+boundaries.
 
 ## Development
 
-The main security boundary is assembled in a few focused modules:
-
-- [`src/cli.ts`](src/cli.ts) owns the trusted host-side launch sequence and the
-  transition into SRT.
-- [`src/policy.ts`](src/policy.ts) defines the default filesystem and host-service
-  policy; [`src/seatbelt.ts`](src/seatbelt.ts) adds the macOS direct-IP rule.
-- [`src/credentials.ts`](src/credentials.ts) resolves selected credentials
-  without exposing their host-side stores.
-- [`src/bazel.ts`](src/bazel.ts) keeps Bazel's persistent server inside one
-  Agentbox launch.
-- [`src/lima-backend.ts`](src/lima-backend.ts) provides Docker through an isolated
-  and disposable VM rather than the host daemon.
-
-Each special-purpose module starts with its problem, isolation approach, and
-important caveats. The implementation should keep those headers current when a
-boundary changes.
-
 ```sh
-npm run format:check
 npm run check
 npm test
-npm pack --dry-run
+npm run format:check
 ```
-
-## License
 
 Apache License 2.0. See [LICENSE](LICENSE).

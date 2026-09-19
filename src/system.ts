@@ -1,17 +1,11 @@
-import {
-  accessSync,
-  constants,
-  existsSync,
-  mkdirSync,
-  statSync,
-} from "node:fs";
-import { homedir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { accessSync, constants, statSync } from "node:fs";
+import { spawn, type SpawnOptions } from "node:child_process";
+import { constants as osConstants, homedir } from "node:os";
+import { delimiter, join } from "node:path";
 
-import { fail } from "./errors.js";
-
-export type EnvironmentOverlay = Record<string, string | null>;
+export function fail(message: string): never {
+  throw new Error(message);
+}
 
 export function expandHome(path: string): string {
   if (path === "~") return homedir();
@@ -23,11 +17,9 @@ export function findExecutable(
   name: string,
   pathValue = process.env.PATH ?? "",
 ): string | undefined {
-  const candidates =
-    isAbsolute(name) || name.includes("/")
-      ? [name]
-      : pathValue.split(delimiter).map((directory) => join(directory, name));
-
+  const candidates = name.includes("/")
+    ? [name]
+    : pathValue.split(delimiter).map((directory) => join(directory, name));
   for (const candidate of candidates) {
     try {
       accessSync(candidate, constants.X_OK);
@@ -39,63 +31,34 @@ export function findExecutable(
   return undefined;
 }
 
-export function overlayEnvironment(
-  base: NodeJS.ProcessEnv,
-  overlay: EnvironmentOverlay,
-): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { ...base };
-  for (const [name, value] of Object.entries(overlay)) {
-    if (value === null) delete result[name];
-    else result[name] = value;
-  }
-  return result;
-}
-
-export function runChecked(
-  argv: readonly string[],
-  overlay?: EnvironmentOverlay,
-): string {
-  const executable = argv[0];
-  if (!executable) fail("internal error: attempted to run an empty command");
-
-  const result = spawnSync(executable, argv.slice(1), {
-    encoding: "utf8",
-    env: overlay ? overlayEnvironment(process.env, overlay) : process.env,
-    maxBuffer: 16 * 1024 * 1024,
+/** Run a child while forwarding terminal and termination signals. */
+export function runChild(
+  executable: string,
+  args: readonly string[],
+  options: SpawnOptions & { input?: string },
+): Promise<number> {
+  const { input, ...spawnOptions } = options;
+  const child = spawn(executable, args, {
+    ...spawnOptions,
+    shell: false,
+    stdio: input === undefined ? options.stdio : ["pipe", "inherit", "inherit"],
   });
-  if (result.error) throw new Error(result.error.message);
-  if (result.status !== 0) {
-    throw new Error(
-      (result.stderr || result.stdout || "command failed").trim(),
-    );
-  }
-  return result.stdout;
-}
-
-export function ensureDirectory(path: string): void {
-  try {
-    mkdirSync(path, { recursive: true });
-  } catch (error) {
-    console.error(`agentbox: could not create ${path}: ${String(error)}`);
-  }
-}
-
-export function isUsableDirectory(path: string | undefined): path is string {
-  if (!path || !existsSync(path)) return false;
-  try {
-    return (
-      statSync(path).isDirectory() &&
-      accessSync(path, constants.W_OK) === undefined
-    );
-  } catch {
-    return false;
-  }
-}
-
-/** Replace the process environment with the exact child allowlist. */
-export function replaceProcessEnvironment(
-  environment: NodeJS.ProcessEnv,
-): void {
-  for (const name of Object.keys(process.env)) delete process.env[name];
-  Object.assign(process.env, environment);
+  if (input !== undefined) child.stdin?.end(input);
+  const handlers = (["SIGINT", "SIGTERM", "SIGHUP", "SIGWINCH"] as const).map(
+    (signal) => [signal, () => child.kill(signal)] as const,
+  );
+  for (const [signal, handler] of handlers) process.on(signal, handler);
+  const cleanup = () => {
+    for (const [signal, handler] of handlers) process.off(signal, handler);
+  };
+  return new Promise((resolve, reject) => {
+    child.once("error", (error) => {
+      cleanup();
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      cleanup();
+      resolve(signal ? 128 + (osConstants.signals[signal] ?? 1) : (code ?? 1));
+    });
+  });
 }

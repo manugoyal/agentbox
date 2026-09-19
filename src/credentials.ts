@@ -1,168 +1,102 @@
-/**
- * Host-side credential brokering.
- *
- * Agentbox asks the host AWS and 1Password CLIs for only the credentials named
- * by the user, validates the result, and passes the resulting environment
- * values into the sandbox. The sandbox never needs the host credential stores
- * or their ambient session state.
- *
- * This limits credential discovery, not credential authority. Once injected,
- * a value is readable by sandboxed code and usable anywhere its service-side
- * permissions allow, so callers should select short-lived, narrowly scoped
- * credentials.
- */
-import { fail } from "./errors.js";
-import { findExecutable, runChecked } from "./system.js";
+/** Resolve only selected credentials on the host. Scopes are enforced by each service. */
+import { spawnSync } from "node:child_process";
+import { z } from "zod";
+import { fail, findExecutable } from "./system.js";
 
-const PRIVILEGED_MARKERS = [
-  "Administrator",
-  "FullAccess",
-  "PowerUser",
-  ":root",
-] as const;
+function readCredential(
+  tool: string,
+  args: string[],
+  env = process.env,
+): string {
+  const executable =
+    findExecutable(tool) ??
+    fail(`${tool} is required on the host for the selected credentials`);
+  const result = spawnSync(executable, args, {
+    env,
+    encoding: "utf8",
+    maxBuffer: 1024 ** 2,
+    timeout: 120_000,
+  });
+  // Neither stdout nor stderr from credential tools is safe to echo blindly.
+  if (result.error || result.status !== 0)
+    fail(
+      `${tool} credential lookup failed; check the selected profile/reference and authenticate on the host`,
+    );
+  return result.stdout;
+}
 
-export type AwsCredentials = {
-  environment: Record<string, string>;
-  identity: string;
-};
-
+const awsExport = z.object({
+  AccessKeyId: z.string().min(1),
+  SecretAccessKey: z.string().min(1),
+  SessionToken: z.string().min(1),
+  Expiration: z.string().min(1),
+});
 export function exportAwsCredentials(
   profile: string,
   region: string,
-): AwsCredentials {
-  if (!findExecutable("aws")) {
-    fail("aws CLI is not installed, but an AWS profile was given");
-  }
-
-  const cleanProfiles = {
-    AWS_PROFILE: null,
-    AWS_DEFAULT_PROFILE: null,
-  } as const;
-
-  let exported: string;
+): { environment: Record<string, string>; expiration: string } {
+  const env = { ...process.env };
+  for (const key of [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+  ])
+    delete env[key];
+  let value: z.infer<typeof awsExport>;
   try {
-    exported = runChecked(
-      [
-        "aws",
-        "configure",
-        "export-credentials",
-        "--profile",
-        profile,
-        "--format",
-        "env-no-export",
-      ],
-      cleanProfiles,
+    value = awsExport.parse(
+      JSON.parse(
+        readCredential(
+          "aws",
+          [
+            "configure",
+            "export-credentials",
+            "--profile",
+            profile,
+            "--format",
+            "process",
+          ],
+          env,
+        ),
+      ),
     );
-  } catch (error) {
+  } catch {
     fail(
-      `could not export credentials for profile ${JSON.stringify(profile)}: ` +
-        `${String(error)}\n         if it is an SSO profile, try: ` +
-        `aws sso login --profile ${profile}`,
+      "AWS profile must provide temporary credentials with a session token and expiration; authenticate with the selected role or SSO profile on the host",
     );
   }
-
-  const environment: Record<string, string> = {};
-  for (const line of exported.split(/\r?\n/)) {
-    const separator = line.indexOf("=");
-    if (separator < 1) continue;
-    const name = line.slice(0, separator).trim();
-    if (name.startsWith("AWS_")) {
-      environment[name] = line.slice(separator + 1).trim();
-    }
-  }
-  if (!environment.AWS_ACCESS_KEY_ID) {
-    fail(`profile ${JSON.stringify(profile)} produced no access key`);
-  }
-  environment.AWS_REGION = region;
-  environment.AWS_DEFAULT_REGION = region;
-
-  let identity: string;
-  try {
-    identity = runChecked(
-      [
-        "aws",
-        "sts",
-        "get-caller-identity",
-        "--query",
-        "Arn",
-        "--output",
-        "text",
-      ],
-      {
-        ...environment,
-        AWS_PROFILE: null,
-        AWS_DEFAULT_PROFILE: null,
-        AWS_CONFIG_FILE: null,
-        AWS_SHARED_CREDENTIALS_FILE: null,
-      },
-    ).trim();
-  } catch (error) {
+  const expiration = Date.parse(value.Expiration);
+  if (!Number.isFinite(expiration) || expiration <= Date.now() + 30_000)
     fail(
-      `the exported credentials for ${JSON.stringify(profile)} do not work: ` +
-        String(error),
+      "AWS credentials are expired or about to expire; refresh the host session",
     );
-  }
-
-  if (PRIVILEGED_MARKERS.some((marker) => identity.includes(marker))) {
-    console.error(
-      `agentbox: WARNING: ${identity} looks privileged, not read-only.`,
-    );
-  }
-  return { environment, identity };
-}
-
-function resolveReference(raw: string): string {
-  const text = raw.trim();
-  if (!text.startsWith("$")) return text;
-
-  let name = text.slice(1);
-  if (name.startsWith("{") && name.endsWith("}")) name = name.slice(1, -1);
-  if (!name) fail(`${JSON.stringify(raw)} names no environment variable`);
-
-  const value = process.env[name]?.trim();
-  if (!value)
-    fail(`$${name} is unset or empty, so there is no reference to read`);
-  return value;
+  return {
+    expiration: value.Expiration,
+    environment: {
+      AWS_ACCESS_KEY_ID: value.AccessKeyId,
+      AWS_SECRET_ACCESS_KEY: value.SecretAccessKey,
+      AWS_SESSION_TOKEN: value.SessionToken,
+      AWS_REGION: region,
+      AWS_DEFAULT_REGION: region,
+    },
+  };
 }
 
 export function readSecrets(
-  specifications: readonly string[],
+  specifications: Readonly<Record<string, string>>,
 ): Record<string, string> {
-  if (specifications.length === 0) return {};
-  if (!findExecutable("op"))
-    fail("op is not installed, but secrets were requested");
-
   const secrets: Record<string, string> = {};
-  for (const specification of specifications) {
-    const separator = specification.indexOf("=");
-    const name = separator < 0 ? "" : specification.slice(0, separator);
-    const rawReference =
-      separator < 0 ? "" : specification.slice(separator + 1);
-    if (!name || !rawReference) {
-      fail(
-        `bad secret ${JSON.stringify(specification)}, expected ` +
-          "NAME=op://... or NAME=$VAR",
-      );
+  for (const [name, specification] of Object.entries(specifications)) {
+    let reference = specification.trim();
+    if (reference.startsWith("$")) {
+      const variable = reference.slice(1).replace(/^\{(.*)\}$/, "$1");
+      reference = process.env[variable]?.trim() ?? "";
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
-      fail(`${JSON.stringify(name)} is not a valid environment variable name`);
-    }
-
-    const reference = resolveReference(rawReference);
-    if (!reference.startsWith("op://")) {
-      fail(
-        `${name} resolved to ${JSON.stringify(reference)}, which is not an ` +
-          "op:// reference.\n         Pass an op:// path, or $VAR naming a " +
-          "variable that holds one.",
-      );
-    }
-    try {
-      secrets[name] = runChecked(["op", "read", reference]).trim();
-    } catch (error) {
-      fail(
-        `could not read ${reference}: ${String(error)}\n         is op signed in?`,
-      );
-    }
+    if (!reference.startsWith("op://"))
+      fail(`secret ${name} must resolve to an op:// reference`);
+    secrets[name] = readCredential("op", ["read", "--no-newline", reference]);
   }
   return secrets;
 }
