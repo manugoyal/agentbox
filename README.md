@@ -97,7 +97,16 @@ agentbox copy ./config.json src/project/config.json
 agentbox copy --recursive ./fixtures src/project/
 ```
 
-`agentbox cp` is an alias. Copies are explicit and do not create a host mount.
+Copy from the guest by providing an explicit host destination. Existing host
+files may be overwritten:
+
+```sh
+agentbox copy --from-guest build/output.tar ./output.tar
+agentbox copy --from-guest --recursive build/reports ./reports
+```
+
+`agentbox cp` is an alias in either direction. Copies are explicit and do not
+create a host mount.
 
 Ghostty users should install its terminal definition in the VM once so keys and
 screen editing work correctly:

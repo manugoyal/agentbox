@@ -205,16 +205,18 @@ export class Lima {
     source: string,
     destination: string,
     recursive = false,
+    fromGuest = false,
   ): Promise<number> {
     this.validateInstance();
+    const guest = `${this.config.vm.name}:`;
     return runChild(
       this.executable,
       [
         "copy",
         ...(recursive ? ["--recursive"] : []),
         "--",
-        source,
-        `${this.config.vm.name}:${destination}`,
+        fromGuest ? `${guest}${source}` : source,
+        fromGuest ? destination : `${guest}${destination}`,
       ],
       { env: this.env, stdio: "inherit" },
     );

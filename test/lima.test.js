@@ -74,10 +74,15 @@ if(args[0]==='list') process.stdout.write('Running\\n');
   assert.equal(run("vm", "stop").status, 0);
   assert.equal(run("copy", "--recursive", "host directory", "src/").status, 0);
   assert.equal(run("cp", "host-file").status, 0);
+  result = run("copy", "--from-guest", "build/output.tar", "host output.tar");
+  assert.equal(result.status, 0, result.stderr);
+  result = run("copy", "--from-guest", "build/output.tar");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /HOST_PATH/);
   const calls = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
   assert.deepEqual(
     calls.map((c) => c.args[0]),
-    ["create", "start", "start", "list", "stop", "copy", "copy"],
+    ["create", "start", "start", "list", "stop", "copy", "copy", "copy"],
   );
   assert.equal(calls[0].args.at(-1), "-");
   assert.deepEqual(calls[5].args, [
@@ -88,6 +93,12 @@ if(args[0]==='list') process.stdout.write('Running\\n');
     "dev:src/",
   ]);
   assert.deepEqual(calls[6].args, ["copy", "--", "host-file", "dev:."]);
+  assert.deepEqual(calls[7].args, [
+    "copy",
+    "--",
+    "dev:build/output.tar",
+    "host output.tar",
+  ]);
   assert.ok(calls.every((c) => c.home === limaHome && c.ambient === null));
 
   mkdirSync(join(limaHome, "_config"));
