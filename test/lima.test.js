@@ -72,12 +72,22 @@ if(args[0]==='list') process.stdout.write('Running\\n');
   assert.equal(parse(readFileSync(instance, "utf8")).cpus, 6);
   assert.equal(run("vm", "status").stdout.trim(), "Running");
   assert.equal(run("vm", "stop").status, 0);
+  assert.equal(run("copy", "--recursive", "host directory", "src/").status, 0);
+  assert.equal(run("cp", "host-file").status, 0);
   const calls = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
   assert.deepEqual(
     calls.map((c) => c.args[0]),
-    ["create", "start", "start", "list", "stop"],
+    ["create", "start", "start", "list", "stop", "copy", "copy"],
   );
   assert.equal(calls[0].args.at(-1), "-");
+  assert.deepEqual(calls[5].args, [
+    "copy",
+    "--recursive",
+    "--",
+    "host directory",
+    "dev:src/",
+  ]);
+  assert.deepEqual(calls[6].args, ["copy", "--", "host-file", "dev:."]);
   assert.ok(calls.every((c) => c.home === limaHome && c.ambient === null));
 
   mkdirSync(join(limaHome, "_config"));

@@ -201,6 +201,24 @@ export class Lima {
       stdio: "inherit",
     });
   }
+  async copy(
+    source: string,
+    destination: string,
+    recursive = false,
+  ): Promise<number> {
+    this.validateInstance();
+    return runChild(
+      this.executable,
+      [
+        "copy",
+        ...(recursive ? ["--recursive"] : []),
+        "--",
+        source,
+        `${this.config.vm.name}:${destination}`,
+      ],
+      { env: this.env, stdio: "inherit" },
+    );
+  }
   connection(): Connection {
     this.validateInstance();
     if (this.status() !== "Running")

@@ -14,6 +14,7 @@ export const HELP = `Usage:
   agentbox vm status                  Show VM status
   agentbox run [options] -- COMMAND   Run in the VM with selected credentials
   agentbox -- COMMAND                Shorthand for run
+  agentbox copy SOURCE [GUEST_PATH]  Copy a host file into the VM (alias: cp)
   agentbox git init NAME              Create a bare exchange repository in the VM
   agentbox git push NAME [REFSPEC]    Push from this host checkout to the exchange
   agentbox git fetch NAME             Fetch into refs/remotes/agentbox/NAME/*
@@ -31,6 +32,7 @@ Options:
       --host-cpus N       Override detected specs when generating a config
       --host-memory-gib N Override detected host RAM
       --vm-type TYPE      vz or qemu (default: vz on macOS, qemu elsewhere)
+      --recursive         Copy a directory recursively
   -p, --profile NAME       Host AWS profile issuing temporary, read-only credentials
   -r, --region REGION      AWS region (default: us-east-1)
   -s, --secret NAME=REF    Host 1Password op:// reference, or $REFERENCE_VARIABLE
@@ -59,6 +61,7 @@ export function parseArguments(args: string[]) {
       "host-cpus": { type: "string" },
       "host-memory-gib": { type: "string" },
       "vm-type": { type: "string" },
+      recursive: { type: "boolean" },
       profile: { type: "string", short: "p" },
       region: { type: "string", short: "r" },
       secret: { type: "string", short: "s", multiple: true },
@@ -143,6 +146,12 @@ export async function run(args = process.argv.slice(2)): Promise<number> {
     if (positionals.length > 1 || !command.length)
       fail("provide a command after --");
     return runSession(new Lima(config).connection(), config.run, command);
+  }
+  if (action === "copy" || action === "cp") {
+    const [, source, destination = "."] = positionals;
+    if (!source || positionals.length > 3 || command.length)
+      fail("use copy [--recursive] SOURCE [GUEST_PATH]");
+    return new Lima(config).copy(source, destination, values.recursive);
   }
   if (action === "git") {
     const [, operation, name, refspec] = positionals;

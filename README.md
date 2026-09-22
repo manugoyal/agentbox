@@ -88,6 +88,17 @@ agentbox -- bash -lc 'cd ~/src/project && make test'
 The guest has sudo, Docker, Compose, Git, Node, Python, and basic build tools.
 Install project-specific tools normally inside the guest.
 
+Copy a host file into the guest home, or provide a guest-relative or absolute
+destination. Use `--recursive` for directories:
+
+```sh
+agentbox copy ./config.json
+agentbox copy ./config.json src/project/config.json
+agentbox copy --recursive ./fixtures src/project/
+```
+
+`agentbox cp` is an alias. Copies are explicit and do not create a host mount.
+
 Ghostty users should install its terminal definition in the VM once so keys and
 screen editing work correctly:
 
