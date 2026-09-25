@@ -11,6 +11,7 @@
     "dist",
     "vm/ubuntu.yaml",
     "vm/session.py",
+    "vm/tmux.py",
     "LICENSE",
     "README.md"
   ],

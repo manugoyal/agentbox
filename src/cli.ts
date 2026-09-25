@@ -3,6 +3,7 @@ import { parseArgs } from "node:util";
 import { configSchema, EXAMPLE_CONFIG, loadConfig } from "./config.js";
 import { generateVM, hostMachine, Lima } from "./lima.js";
 import { runSession } from "./session.js";
+import { refreshTmux } from "./tmux.js";
 import { exchange, publish } from "./git.js";
 import { publishImage } from "./docker.js";
 import { fail } from "./system.js";
@@ -14,6 +15,7 @@ export const HELP = `Usage:
   agentbox vm status                  Show VM status
   agentbox run [options] -- COMMAND   Run in the VM with selected credentials
   agentbox -- COMMAND                Shorthand for run
+  agentbox tmux refresh SESSION       Refresh and attach to one tmux session
   agentbox copy SOURCE [GUEST_PATH]  Copy a host file into the VM (alias: cp)
   agentbox copy --from-guest GUEST_PATH HOST_PATH
                                       Copy a guest file onto the host
@@ -150,6 +152,20 @@ export async function run(args = process.argv.slice(2)): Promise<number> {
     if (positionals.length > 1 || !command.length)
       fail("provide a command after --");
     return runSession(new Lima(config).connection(), config.run, command);
+  }
+  if (action === "tmux") {
+    if (
+      positionals[1] !== "refresh" ||
+      !positionals[2] ||
+      positionals.length !== 3 ||
+      command.length
+    )
+      fail("use tmux refresh SESSION");
+    return refreshTmux(
+      new Lima(config).connection(),
+      config.run,
+      positionals[2],
+    );
   }
   if (action === "copy" || action === "cp") {
     const [, source, requestedDestination] = positionals;

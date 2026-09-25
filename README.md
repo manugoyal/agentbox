@@ -48,7 +48,7 @@ aws_region = "us-east-1"
 
 [run.secrets]
 GH_TOKEN = "op://Agentbox/GitHub/token"
-BRAINTRUST_API_KEY = "op://Agentbox/Braintrust/token"
+SERVICE_API_KEY = "op://Agentbox/Service/token"
 ```
 
 Credential values do not belong in this file. Authenticate the AWS and
@@ -143,37 +143,96 @@ agentbox run \
 
 ### tmux
 
-A convenient long-lived workflow is:
+A convenient long-lived workflow is to keep one or more named tmux sessions and
+explicitly choose which one receives the credentials from an Agentbox launch:
 
 ```sh
-agentbox -- tmux new-session -A -s dev
+agentbox tmux refresh dev
 ```
 
-The tmux server keeps the environment with which it was started. To update its
-environment when you attach again, add the names you use to `~/.tmux.conf`
-inside the VM:
+Agentbox resolves credentials on every launch. An existing tmux session,
+however, has its own environment, and each shell and program inside it has a
+separate copy. `agentbox tmux refresh SESSION` writes the credentials and
+configured `[run.env]` values from that launch into only the named session,
+clears values that were previously selected but are no longer present, and
+attaches to it. Credential values are not put in tmux's global environment, so
+other sessions keep their own values. No variable list is needed in
+`.tmux.conf`. Existing shells still need to copy the refreshed session
+environment into themselves.
 
-```tmux
-set -ga update-environment " AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION GH_TOKEN BRAINTRUST_API_KEY DATADOG_SERVICE_ACCESS_TOKEN"
-```
-
-Source that file once if tmux is already running:
+Use a different Agentbox configuration or command-line credential selection
+for each session when needed:
 
 ```sh
-tmux source-file ~/.tmux.conf
+agentbox -c ~/.config/agentbox/work.toml tmux refresh work
+agentbox -c ~/.config/agentbox/personal.toml tmux refresh personal
 ```
 
-After refreshing credentials on the host, run the same
-`agentbox -- tmux new-session -A -s dev` command. New windows and panes inherit
-the refreshed values. Existing shells cannot be changed externally; open a new
-pane or run:
+#### One-time setup
+
+Add this helper to `~/.zshrc` inside the VM. It refreshes the current shell
+directly and sends the same command to every other idle zsh or bash pane in the
+current session:
+
+```zsh
+agentbox-refresh-tmux() {
+  if [[ -z ${TMUX-} ]]; then
+    print -u2 "Not inside tmux"
+    return 1
+  fi
+
+  local current_pane=$TMUX_PANE
+  local pane foreground
+  local refreshed=0
+
+  eval "$(command tmux show-environment -s)"
+  (( ++refreshed ))
+
+  while IFS='|' read -r pane foreground; do
+    [[ "$pane" == "$current_pane" ]] && continue
+
+    case "$foreground" in
+      zsh|bash)
+        command tmux send-keys -t "$pane" C-c \
+          'eval "$(tmux show-environment -s)"' Enter
+        (( ++refreshed ))
+        ;;
+      *)
+        print -u2 "Skipped $pane ($foreground): restart it after refreshing its shell"
+        ;;
+    esac
+  done < <(
+    command tmux list-panes -s \
+      -F '#{pane_id}|#{pane_current_command}'
+  )
+
+  print "Refreshed environment in $refreshed shell pane(s)"
+}
+```
+
+Load the helper into the current shell once:
 
 ```sh
-eval "$(tmux show-environment -s)"
+source ~/.zshrc
 ```
 
-A program that cached credentials internally may still need to be restarted.
-The tmux server and VM do not.
+#### Refresh credentials
+
+1. Refresh or unlock the configured credential providers on the host if
+   necessary.
+2. From the host, run `agentbox tmux refresh SESSION`. Agentbox obtains fresh
+   values, configures only the named tmux session to refresh every injected
+   name, and attaches to it.
+3. Once attached, run `agentbox-refresh-tmux`. New panes already inherit the
+   updated values; the helper updates existing idle shell panes in the current
+   session as well.
+
+The helper skips panes with a foreground program because a running process's
+environment cannot be changed externally. Stop that process, run
+`agentbox-refresh-tmux` again after its shell prompt returns, then restart the
+process. There is no need to recreate the tmux session or restart the VM. The
+helper sends `C-c` to other idle shell panes, so it also clears any unfinished
+command at their prompts.
 
 ## Ports
 

@@ -81,8 +81,8 @@ aws_region = "us-east-1"
 [run.secrets]
 # Stored tokens must already have the required scopes and expiration.
 # GH_TOKEN = "op://Agentbox/GitHub/token"
-# BRAINTRUST_API_KEY = "op://Agentbox/Braintrust/token"
+# SERVICE_API_KEY = "op://Agentbox/Service/token"
 
 [run.env]
-# BRAINTRUST_APP_URL = "http://localhost:3000"
+# SERVICE_URL = "http://localhost:3000"
 `;

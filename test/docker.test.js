@@ -14,7 +14,7 @@ import { publishImage, validateImageReference } from "../dist/docker.js";
 import { Connection } from "../dist/lima.js";
 import { sshFixture } from "./helpers/ssh.js";
 
-const reference = "public.ecr.aws/braintrust/brainstore:manu-test-docker-in-vm";
+const reference = "registry.example.com/team/app:test";
 const imageId =
   "sha256:1f2d3cbd7c0da35418b82811e84dc9b43ef2a3de90bc6136636cbabb44945b88";
 
@@ -64,7 +64,7 @@ fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({
   archive: fs.readFileSync(args[1], "utf8"),
   marker: process.env.HOST_AUTH_MARKER,
 }));
-process.stdout.write("public.ecr.aws/braintrust/brainstore@sha256:digest\\n");
+process.stdout.write("registry.example.com/team/app@sha256:digest\\n");
 `,
     { mode: 0o755 },
   );
@@ -111,10 +111,10 @@ process.stdout.write("public.ecr.aws/braintrust/brainstore@sha256:digest\\n");
 
 test("docker publish rejects ambiguous references and missing guest images", async (t) => {
   for (const invalid of [
-    "brainstore",
-    "brainstore@sha256:deadbeef",
+    "app",
+    "app@sha256:deadbeef",
     "-invalid:tag",
-    "brainstore:tag\nsecond",
+    "app:tag\nsecond",
   ])
     assert.throws(() => validateImageReference(invalid), /explicit tag/);
 
