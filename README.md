@@ -193,8 +193,11 @@ agentbox-refresh-tmux() {
 
     case "$foreground" in
       zsh|bash)
-        command tmux send-keys -t "$pane" C-c \
-          'eval "$(tmux show-environment -s)"' Enter
+        command tmux send-keys -t "$pane" C-c
+        sleep 0.2
+        command tmux send-keys -l -t "$pane" \
+          'eval "$(tmux show-environment -s)"'
+        command tmux send-keys -t "$pane" Enter
         (( ++refreshed ))
         ;;
       *)
