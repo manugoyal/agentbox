@@ -210,6 +210,14 @@ agentbox-refresh-tmux() {
 }
 ```
 
+Codex users should also add this alias to `~/.zshrc`. Running without the
+long-lived daemon makes each Codex launch inherit the refreshed environment of
+the shell that invoked it:
+
+```zsh
+alias codex='codex --no-daemon'
+```
+
 Load the helper into the current shell once:
 
 ```sh
