@@ -321,6 +321,8 @@ From the host checkout, publish that branch directly to its normal `origin`:
 
 ```sh
 agentbox git publish project my-work
+# Add --force to overwrite a non-fast-forward branch.
+agentbox git publish project my-work --force
 ```
 
 This fetches the exchange branch and pushes it using the host's Git credentials,

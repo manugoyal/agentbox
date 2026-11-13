@@ -23,6 +23,7 @@ export const HELP = `Usage:
   agentbox git push NAME [REFSPEC]    Push from this host checkout to the exchange
   agentbox git fetch NAME             Fetch into refs/remotes/agentbox/NAME/*
   agentbox git publish NAME BRANCH    Fetch a branch and push it to host origin
+                                      (use --force to overwrite the remote branch)
   agentbox docker publish IMAGE       Publish a guest image with host credentials
 
 Options:
@@ -68,6 +69,7 @@ export function parseArguments(args: string[]) {
       "vm-type": { type: "string" },
       recursive: { type: "boolean" },
       "from-guest": { type: "boolean" },
+      force: { type: "boolean" },
       profile: { type: "string", short: "p" },
       region: { type: "string", short: "r" },
       secret: { type: "string", short: "s", multiple: true },
@@ -187,7 +189,12 @@ export async function run(args = process.argv.slice(2)): Promise<number> {
     if (operation === "publish") {
       if (!name || !refspec || positionals.length !== 4)
         fail("use git publish NAME BRANCH");
-      return publish(new Lima(config).connection(), name, refspec);
+      return publish(
+        new Lima(config).connection(),
+        name,
+        refspec,
+        values.force,
+      );
     }
     if (
       !operation ||

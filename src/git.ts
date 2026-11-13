@@ -72,6 +72,7 @@ export async function publish(
   connection: Connection,
   name: string,
   branch: string,
+  force = false,
 ): Promise<number> {
   const git = findExecutable("git") ?? fail("Git is required on the host");
   const checked = spawnSync(git, ["check-ref-format", "--branch", branch], {
@@ -85,6 +86,7 @@ export async function publish(
     git,
     [
       "push",
+      ...(force ? ["--force"] : []),
       "--",
       "origin",
       `refs/remotes/agentbox/${name}/${branch}:refs/heads/${branch}`,

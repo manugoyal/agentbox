@@ -97,4 +97,9 @@ test("configuration is strict and command argv after -- is untouched", (t) => {
     "--vm",
     "child-option",
   ]);
+  assert.equal(
+    parseArguments(["git", "publish", "project", "main", "--force"]).values
+      .force,
+    true,
+  );
 });

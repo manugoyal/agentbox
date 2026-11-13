@@ -150,5 +150,24 @@ test(
       readFileSync(join(host, "work.txt"), "utf8"),
       "uncommitted host work\n",
     );
+
+    git(
+      "--git-dir",
+      published,
+      "update-ref",
+      "refs/heads/guest-work",
+      original,
+    );
+    const rejected = spawnSync(
+      process.execPath,
+      [resolve("bin/agentbox.js"), "git", "publish", name, "guest-work"],
+      { cwd: host, env: f.env, encoding: "utf8" },
+    );
+    assert.notEqual(rejected.status, 0);
+    agentbox("publish", name, "guest-work", "--force");
+    assert.equal(
+      git("--git-dir", published, "rev-parse", "refs/heads/guest-work"),
+      git("rev-parse", `refs/remotes/agentbox/${name}/guest-work`),
+    );
   },
 );
